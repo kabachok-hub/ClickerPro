@@ -1,0 +1,4 @@
+# Exclude legacy prototype Python scripts from GitHub language statistics
+*.py linguist-vendored
+src/** linguist-vendored
+tests/** linguist-vendored
