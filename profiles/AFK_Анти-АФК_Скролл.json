@@ -1,0 +1,12 @@
+{
+  "tab": "scroll",
+  "scroll": {
+    "direction": "down",
+    "ticks": 1,
+    "interval_ms": 500.0,
+    "random_delay_ms": 50.0,
+    "smooth": true,
+    "location_type": "cursor",
+    "stop_condition": "infinite"
+  }
+}

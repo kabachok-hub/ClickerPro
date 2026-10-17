@@ -1,0 +1,13 @@
+{
+  "tab": "mouse",
+  "mouse": {
+    "button": "left",
+    "click_type": "single",
+    "mode": "cps",
+    "cps": 100.0,
+    "interval_ms": 10.0,
+    "random_delay_ms": 1.0,
+    "location_type": "cursor",
+    "stop_condition": "infinite"
+  }
+}

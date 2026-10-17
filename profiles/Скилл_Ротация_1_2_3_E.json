@@ -1,0 +1,27 @@
+{
+  "tab": "keyboard",
+  "keyboard": {
+    "mode": "sequence",
+    "sequence_steps": [
+      {
+        "key": "1",
+        "delay_ms": 150
+      },
+      {
+        "key": "2",
+        "delay_ms": 150
+      },
+      {
+        "key": "3",
+        "delay_ms": 150
+      },
+      {
+        "key": "e",
+        "delay_ms": 200
+      }
+    ],
+    "interval_ms": 500.0,
+    "random_delay_ms": 20.0,
+    "stop_condition": "infinite"
+  }
+}

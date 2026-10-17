@@ -1,0 +1,26 @@
+# Rust build artifacts
+target/
+**/target/
+Cargo.lock
+
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+build/
+dist/
+*.spec
+ClickerPro_Python.exe
+ClickerPro_Rust.exe
+*Автокликер*
+
+# OS / Editor artifacts
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.user
+Thumbs.db
+Desktop.ini
