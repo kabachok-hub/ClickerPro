@@ -10,12 +10,14 @@ pub enum VisionMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PopupColorFilter {
-    AnyAppearance, // Любой новый объект / кнопка
-    BrightOnly,    // Только яркие / светящиеся элементы
-    GoldYellow,    // Золотые / жёлтые монетки и кнопки
-    Green,         // Зелёные кнопки
-    Red,           // Красные кнопки / мишени
-    CyanBlue,      // Голубые / синие кнопки
+    PurpleViolet,       // 🟣 Фиолетовый / Пурпурный кружок (Roblox x2 / x3 / x5 / Тап)
+    WhitePointerInside, // 👆 Белая рука / тап внутри кружка
+    AnyVibrant,         // 🌈 Любой цветной контрастный кружок / кнопка
+    GoldYellow,         // 🟡 Золотые / жёлтые монетки
+    Green,              // 🟢 Зелёные кнопки
+    Red,                // 🔴 Красные кнопки
+    CyanBlue,           // 🔵 Синие / голубые кнопки
+    MotionDiff,         // ⚡ По движению / разнице кадров
 }
 
 #[derive(Debug, Clone)]
@@ -150,18 +152,18 @@ impl Default for VisionConfig {
         Self {
             mode: VisionMode::AutoPopup, // Default to Smart Auto Pop-up Hunter
 
-            popup_min_size: 20,
-            popup_max_size: 350,
-            popup_sensitivity: 45,
-            popup_filter: PopupColorFilter::AnyAppearance,
+            popup_min_size: 25,
+            popup_max_size: 240,
+            popup_sensitivity: 40,
+            popup_filter: PopupColorFilter::PurpleViolet, // Default to 🟣 Roblox Circle x2 / Tap
             popup_click_button: MouseButton::Left,
             popup_click_type: ClickType::Single,
-            popup_hold_ms: 100.0,
+            popup_hold_ms: 45.0, // Critical for Roblox GUI event triggers!
 
             templates: Vec::new(),
 
-            scan_interval_ms: 35.0,
-            cooldown_ms: 250.0,
+            scan_interval_ms: 30.0,
+            cooldown_ms: 220.0,
             return_cursor: true,
             click_jitter_px: 2,
             use_custom_region: false,
@@ -346,7 +348,7 @@ impl PopupDetector {
             prev_grid: None,
             grid_w: 0,
             grid_h: 0,
-            cell_size: 10, // 10x10 px cells for sub-millisecond scan speed
+            cell_size: 4, // 4x4 px grid for high precision (<0.3ms scan speed)
         }
     }
 
@@ -354,7 +356,7 @@ impl PopupDetector {
         self.prev_grid = None;
     }
 
-    /// Scans the screen, detects newly appeared objects / popups, and returns center (X, Y).
+    /// Scans the screen, detects target buttons / popups, and returns center (X, Y).
     pub fn detect_popup(
         &mut self,
         screen: &ScreenCapture,
@@ -411,15 +413,20 @@ impl PopupDetector {
             }
         }
 
-        let prev = match &self.prev_grid {
-            Some(p) if p.len() == curr_grid.len() => p,
-            _ => {
-                // Initialize baseline
-                self.prev_grid = Some(curr_grid);
-                self.grid_w = grid_w;
-                self.grid_h = grid_h;
-                return None;
+        let is_motion_diff = config.popup_filter == PopupColorFilter::MotionDiff;
+
+        let prev_opt = if is_motion_diff {
+            match &self.prev_grid {
+                Some(p) if p.len() == curr_grid.len() => Some(p),
+                _ => {
+                    self.prev_grid = Some(curr_grid);
+                    self.grid_w = grid_w;
+                    self.grid_h = grid_h;
+                    return None;
+                }
             }
+        } else {
+            None
         };
 
         let mut mask = vec![false; grid_w * grid_h];
@@ -427,38 +434,61 @@ impl PopupDetector {
 
         for i in 0..curr_grid.len() {
             let (cr, cg, cb) = curr_grid[i];
-            let (pr, pg, pb) = prev[i];
 
-            let delta = (cr as i32 - pr as i32).abs() as u32
-                + (cg as i32 - pg as i32).abs() as u32
-                + (cb as i32 - pb as i32).abs() as u32;
-
-            let changed = delta >= sens;
-
-            if changed {
-                let passes_filter = match config.popup_filter {
-                    PopupColorFilter::AnyAppearance => true,
-                    PopupColorFilter::BrightOnly => {
-                        let lum = (cr as u32 * 299 + cg as u32 * 587 + cb as u32 * 114) / 1000;
-                        lum > 155
+            let matches = if let Some(prev) = prev_opt {
+                let (pr, pg, pb) = prev[i];
+                let delta = (cr as i32 - pr as i32).abs() as u32
+                    + (cg as i32 - pg as i32).abs() as u32
+                    + (cb as i32 - pb as i32).abs() as u32;
+                delta >= sens
+            } else {
+                match config.popup_filter {
+                    PopupColorFilter::PurpleViolet => {
+                        // 🟣 Violet / Purple circle button (Roblox x2 / x3 / multiplier / tap)
+                        // Deep purple has strong Red and Blue, significantly higher than Green.
+                        cr > 55
+                            && cb > 75
+                            && cg < 125
+                            && (cb as i32 - cg as i32) > 18
+                            && (cr as i32 - cg as i32) > 12
+                            && ((cr as i32 + cb as i32) > (cg as i32 * 2 + 25))
+                    }
+                    PopupColorFilter::WhitePointerInside => {
+                        // 👆 White hand cursor / pointer or white text badge inside a button
+                        cr > 200
+                            && cg > 200
+                            && cb > 200
+                            && (cr as i32 - cg as i32).abs() < 25
+                            && (cr as i32 - cb as i32).abs() < 25
+                    }
+                    PopupColorFilter::AnyVibrant => {
+                        // 🌈 Any vibrant colored button / circle (high color saturation)
+                        let max_c = cr.max(cg).max(cb);
+                        let min_c = cr.min(cg).min(cb);
+                        max_c > 85 && (max_c - min_c) > 60
                     }
                     PopupColorFilter::GoldYellow => {
-                        cr > 140 && cg > 105 && cb < 130 && cr >= cb + 40
+                        // 🟡 Gold / Yellow coins or stars
+                        cr > 140 && cg > 110 && cb < 120 && cr >= cb + 35 && cg >= cb + 25
                     }
                     PopupColorFilter::Green => {
-                        cg > 120 && cg >= cr + 20 && cg >= cb + 20
+                        // 🟢 Green buttons
+                        cg > 120 && cg >= cr + 25 && cg >= cb + 25
                     }
                     PopupColorFilter::Red => {
+                        // 🔴 Red buttons
                         cr > 130 && cr >= cg + 30 && cr >= cb + 30
                     }
                     PopupColorFilter::CyanBlue => {
-                        cb > 130 && (cg > 95 || cb >= cr + 25)
+                        // 🔵 Cyan / Blue buttons
+                        cb > 130 && (cg > 95 || cb >= cr + 25) && cb > cr + 15
                     }
-                };
-
-                if passes_filter {
-                    mask[i] = true;
+                    PopupColorFilter::MotionDiff => false,
                 }
+            };
+
+            if matches {
+                mask[i] = true;
             }
         }
 
@@ -467,9 +497,12 @@ impl PopupDetector {
         let mut best_target: Option<(i32, i32)> = None;
         let mut best_size: usize = 0;
 
-        let min_cells = ((config.popup_min_size / cell_size as i32).max(1) as usize).pow(2) / 3;
-        let max_w_cells = (config.popup_max_size / cell_size as i32).max(1) as usize;
-        let max_h_cells = max_w_cells;
+        let min_pixel_size = config.popup_min_size.max(10);
+        let max_pixel_size = config.popup_max_size.max(min_pixel_size);
+
+        let min_w_cells = (min_pixel_size as usize / cell_size).max(2);
+        let _max_w_cells = (max_pixel_size as usize / cell_size).max(min_w_cells);
+        let min_cells_count = (min_w_cells * min_w_cells) / 3;
 
         for gy in 0..grid_h {
             for gx in 0..grid_w {
@@ -512,11 +545,23 @@ impl PopupDetector {
 
                     let blob_w = blob_max_x - blob_min_x + 1;
                     let blob_h = blob_max_y - blob_min_y + 1;
+                    let blob_pixel_w = (blob_w * cell_size) as i32;
+                    let blob_pixel_h = (blob_h * cell_size) as i32;
 
-                    // Filter out single noise pixels and full-screen scene changes
-                    if cell_count >= min_cells.max(2)
-                        && blob_w <= max_w_cells
-                        && blob_h <= max_h_cells
+                    // Aspect ratio filter: round buttons / badges have aspect ratio near 1.0 (0.45..2.2)
+                    let aspect = blob_w as f32 / blob_h as f32;
+                    let is_button_aspect = aspect >= 0.45 && aspect <= 2.2;
+
+                    // Density filter: solid shapes have density >= 0.20
+                    let density = cell_count as f32 / (blob_w * blob_h) as f32;
+
+                    if cell_count >= min_cells_count
+                        && blob_pixel_w >= min_pixel_size
+                        && blob_pixel_w <= max_pixel_size
+                        && blob_pixel_h >= min_pixel_size
+                        && blob_pixel_h <= max_pixel_size
+                        && is_button_aspect
+                        && density >= 0.20
                     {
                         if cell_count > best_size {
                             best_size = cell_count;
@@ -532,8 +577,9 @@ impl PopupDetector {
             }
         }
 
-        // Always update baseline
-        self.prev_grid = Some(curr_grid);
+        if is_motion_diff {
+            self.prev_grid = Some(curr_grid);
+        }
 
         best_target
     }

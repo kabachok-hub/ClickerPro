@@ -129,7 +129,30 @@ impl ClickerApp {
             new_pt_hold: 0.0,
             new_pt_btn: MouseButton::Left,
 
-            vision_cfg: VisionConfig::default(),
+            vision_cfg: {
+                let mut v = VisionConfig::default();
+                if let Ok(img) = image::load_from_memory(include_bytes!("../../assets/roblox_button.png")) {
+                    let rgba = img.to_rgba8();
+                    let (w, h) = rgba.dimensions();
+                    let mut bgra = Vec::with_capacity((w * h * 4) as usize);
+                    for pixel in rgba.pixels() {
+                        bgra.push(pixel[2]);
+                        bgra.push(pixel[1]);
+                        bgra.push(pixel[0]);
+                        bgra.push(pixel[3]);
+                    }
+                    let tmpl = ButtonTemplate::new(
+                        1001,
+                        "🟣 Кружок Roblox (x2 / Тап)".to_string(),
+                        w,
+                        h,
+                        bgra,
+                        0.80,
+                    );
+                    v.templates.push(tmpl);
+                }
+                v
+            },
             vision_snip_mode: VisionSnipMode::None,
             snip_box_w: 60,
             snip_box_h: 60,
@@ -208,9 +231,23 @@ impl ClickerApp {
             }
             "vision_fast" => {
                 self.active_tab = ActiveTab::Vision;
-                self.vision_cfg.scan_interval_ms = 35.0;
-                self.vision_cfg.cooldown_ms = 200.0;
+                self.vision_cfg.mode = VisionMode::AutoPopup;
+                self.vision_cfg.scan_interval_ms = 30.0;
+                self.vision_cfg.cooldown_ms = 220.0;
                 self.vision_cfg.return_cursor = true;
+            }
+            "roblox_circle" => {
+                self.active_tab = ActiveTab::Vision;
+                self.vision_cfg.mode = VisionMode::AutoPopup;
+                self.vision_cfg.popup_filter = PopupColorFilter::PurpleViolet;
+                self.vision_cfg.popup_min_size = 25;
+                self.vision_cfg.popup_max_size = 240;
+                self.vision_cfg.popup_sensitivity = 40;
+                self.vision_cfg.popup_hold_ms = 45.0;
+                self.vision_cfg.scan_interval_ms = 30.0;
+                self.vision_cfg.cooldown_ms = 220.0;
+                self.vision_cfg.return_cursor = true;
+                self.vision_status_msg = Some("✓ Пресет «Roblox: Фиолетовый кружок x2» активирован!".to_string());
             }
             _ => {}
         }
@@ -937,6 +974,9 @@ impl eframe::App for ClickerApp {
                                             }
                                             if primer_topic_badge(ui, "👁️ Поиск кнопок") {
                                                 self.apply_preset("vision_fast");
+                                            }
+                                            if primer_topic_badge(ui, "🟣 Roblox Кружок x2") {
+                                                self.apply_preset("roblox_circle");
                                             }
                                         });
                                     });
@@ -1979,17 +2019,51 @@ impl ClickerApp {
             "🎯 Тип всплывающего объекта и цвет",
             Some("выберите, на что именно должен реагировать авто-охотник"),
             |ui| {
+                // Quick 1-click Preset for Roblox
+                egui::Frame::none()
+                    .fill(Color32::from_rgb(35, 18, 55))
+                    .rounding(Rounding::same(6.0))
+                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(163, 113, 247)))
+                    .inner_margin(egui::Margin::symmetric(12.0, 8.0))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let roblox_btn = egui::Button::new(
+                                RichText::new("🟣 1-Клик Настройка для Roblox (Фиолетовый кружок x2 / Тап)")
+                                    .size(12.5)
+                                    .strong()
+                                    .color(Color32::WHITE),
+                            )
+                            .fill(Color32::from_rgb(110, 45, 175))
+                            .stroke(Stroke::new(1.0_f32, Color32::from_rgb(180, 110, 255)))
+                            .rounding(Rounding::same(6.0))
+                            .min_size(Vec2::new(0.0, 30.0));
+
+                            if ui.add(roblox_btn).clicked() {
+                                self.apply_preset("roblox_circle");
+                            }
+
+                            ui.label(
+                                RichText::new("— мгновенная настройка цвета, размера и задержки 45мс для Roblox!")
+                                    .size(11.5)
+                                    .color(Color32::from_rgb(210, 185, 255)),
+                            );
+                        });
+                    });
+
+                ui.add_space(10.0);
                 ui.label(RichText::new("Цветовой фильтр всплывашек:").size(12.5).strong().color(Color32::from_rgb(240, 246, 252)));
                 ui.add_space(6.0);
 
                 ui.horizontal_wrapped(|ui| {
                     let filters = [
-                        (PopupColorFilter::AnyAppearance, "🎯 Любая всплывашка (Любой цвет)"),
-                        (PopupColorFilter::BrightOnly, "✨ Только яркие / светящиеся"),
+                        (PopupColorFilter::PurpleViolet, "🟣 Фиолетовый кружок (Roblox x2 / Тап)"),
+                        (PopupColorFilter::WhitePointerInside, "👆 Белая рука-указатель / Тап"),
+                        (PopupColorFilter::AnyVibrant, "🌈 Любой яркий кружок / кнопка"),
                         (PopupColorFilter::GoldYellow, "🟡 Золотые / жёлтые монетки"),
                         (PopupColorFilter::Green, "🟢 Зелёные кнопки"),
                         (PopupColorFilter::Red, "🔴 Красные кнопки"),
                         (PopupColorFilter::CyanBlue, "🔵 Синие / голубые кнопки"),
+                        (PopupColorFilter::MotionDiff, "⚡ По движению / разнице кадров"),
                     ];
 
                     for (filter, label) in filters {

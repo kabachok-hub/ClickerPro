@@ -785,30 +785,41 @@ impl EngineState {
                                         );
                                     } else {
                                         WinInput::set_cursor_pos(final_x + offset_x, final_y + offset_y);
+                                        PrecisionTimer::sleep_ms(6.0); // Allow OS and game window to receive hover/focus
 
+                                        let hold = config.popup_hold_ms.max(35.0);
                                         match config.popup_click_type {
                                             ClickType::Single => {
-                                                WinInput::mouse_click(config.popup_click_button);
+                                                WinInput::mouse_down(config.popup_click_button);
+                                                PrecisionTimer::sleep_ms(hold);
+                                                WinInput::mouse_up(config.popup_click_button);
                                             }
                                             ClickType::Double => {
-                                                WinInput::mouse_click(config.popup_click_button);
-                                                PrecisionTimer::sleep_ms(35.0);
-                                                WinInput::mouse_click(config.popup_click_button);
+                                                WinInput::mouse_down(config.popup_click_button);
+                                                PrecisionTimer::sleep_ms(hold.min(45.0));
+                                                WinInput::mouse_up(config.popup_click_button);
+                                                PrecisionTimer::sleep_ms(30.0);
+                                                WinInput::mouse_down(config.popup_click_button);
+                                                PrecisionTimer::sleep_ms(hold.min(45.0));
+                                                WinInput::mouse_up(config.popup_click_button);
                                             }
                                             ClickType::Triple => {
                                                 for _ in 0..3 {
-                                                    WinInput::mouse_click(config.popup_click_button);
-                                                    PrecisionTimer::sleep_ms(30.0);
+                                                    WinInput::mouse_down(config.popup_click_button);
+                                                    PrecisionTimer::sleep_ms(hold.min(40.0));
+                                                    WinInput::mouse_up(config.popup_click_button);
+                                                    PrecisionTimer::sleep_ms(25.0);
                                                 }
                                             }
                                             ClickType::Hold => {
                                                 WinInput::mouse_down(config.popup_click_button);
-                                                PrecisionTimer::sleep_ms(config.popup_hold_ms.max(10.0));
+                                                PrecisionTimer::sleep_ms(config.popup_hold_ms.max(25.0));
                                                 WinInput::mouse_up(config.popup_click_button);
                                             }
                                         }
 
                                         if config.return_cursor {
+                                            PrecisionTimer::sleep_ms(5.0);
                                             WinInput::set_cursor_pos(orig_pos.0, orig_pos.1);
                                         }
                                     }
@@ -883,30 +894,41 @@ impl EngineState {
                                             );
                                         } else {
                                             WinInput::set_cursor_pos(target_x + offset_x, target_y + offset_y);
+                                            PrecisionTimer::sleep_ms(6.0); // Allow OS and game window to receive hover/focus
 
+                                            let hold = template.hold_ms.max(35.0);
                                             match template.click_type {
                                                 ClickType::Single => {
-                                                    WinInput::mouse_click(template.click_button);
+                                                    WinInput::mouse_down(template.click_button);
+                                                    PrecisionTimer::sleep_ms(hold);
+                                                    WinInput::mouse_up(template.click_button);
                                                 }
                                                 ClickType::Double => {
-                                                    WinInput::mouse_click(template.click_button);
-                                                    PrecisionTimer::sleep_ms(35.0);
-                                                    WinInput::mouse_click(template.click_button);
+                                                    WinInput::mouse_down(template.click_button);
+                                                    PrecisionTimer::sleep_ms(hold.min(45.0));
+                                                    WinInput::mouse_up(template.click_button);
+                                                    PrecisionTimer::sleep_ms(30.0);
+                                                    WinInput::mouse_down(template.click_button);
+                                                    PrecisionTimer::sleep_ms(hold.min(45.0));
+                                                    WinInput::mouse_up(template.click_button);
                                                 }
                                                 ClickType::Triple => {
                                                     for _ in 0..3 {
-                                                        WinInput::mouse_click(template.click_button);
-                                                        PrecisionTimer::sleep_ms(30.0);
+                                                        WinInput::mouse_down(template.click_button);
+                                                        PrecisionTimer::sleep_ms(hold.min(40.0));
+                                                        WinInput::mouse_up(template.click_button);
+                                                        PrecisionTimer::sleep_ms(25.0);
                                                     }
                                                 }
                                                 ClickType::Hold => {
                                                     WinInput::mouse_down(template.click_button);
-                                                    PrecisionTimer::sleep_ms(template.hold_ms.max(10.0));
+                                                    PrecisionTimer::sleep_ms(template.hold_ms.max(25.0));
                                                     WinInput::mouse_up(template.click_button);
                                                 }
                                             }
 
                                             if config.return_cursor {
+                                                PrecisionTimer::sleep_ms(5.0);
                                                 WinInput::set_cursor_pos(orig_pos.0, orig_pos.1);
                                             }
                                         }
