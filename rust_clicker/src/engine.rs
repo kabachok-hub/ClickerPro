@@ -169,6 +169,7 @@ impl Default for WindowTargetConfig {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct UnifiedConfig {
     // 1. Popup Hunter
@@ -1002,6 +1003,7 @@ impl EngineState {
         }
     }
 
+    #[allow(dead_code)]
     pub fn toggle_unified(&self, config: UnifiedConfig, adv: AdvancedConfig) {
         if self.is_running() {
             self.stop();

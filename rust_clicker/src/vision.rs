@@ -2,12 +2,14 @@ use std::path::Path;
 use crate::screen_capture::ScreenCapture;
 use crate::win_input::{ClickType, MouseButton};
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VisionMode {
     AutoPopup,     // Smart Pop-up Hunter (Screen Diff & Blob Detection) - 0 manual cropping!
     TemplateMatch, // Traditional template matching
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PopupColorFilter {
     PurpleViolet,       // 🟣 Фиолетовый / Пурпурный кружок (Roblox x2 / x3 / x5 / Тап)
@@ -20,6 +22,7 @@ pub enum PopupColorFilter {
     MotionDiff,         // ⚡ По движению / разнице кадров
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct ButtonTemplate {
     pub id: u64,

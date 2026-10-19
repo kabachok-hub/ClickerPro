@@ -237,7 +237,7 @@ impl ScreenCapture {
             let blt_res = if pw_res != 0 {
                 1
             } else {
-                BitBlt(hdc_mem, 0, 0, width, height, hdc_screen, 0, 0, SRCCOPY)
+                BitBlt(hdc_mem, 0, 0, width, height, hdc_screen, 0, 0, SRCCOPY | CAPTUREBLT)
             };
 
             let mut buffer = vec![0u8; (width * height * 4) as usize];
