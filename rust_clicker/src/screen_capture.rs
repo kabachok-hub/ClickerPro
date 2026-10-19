@@ -9,6 +9,8 @@ use winapi::um::winuser::{
     SM_CYSCREEN,
 };
 
+pub const CAPTUREBLT: DWORD = 0x40000000;
+
 pub struct ScreenCapture {
     pub width: i32,
     pub height: i32,
@@ -46,8 +48,8 @@ impl ScreenCapture {
 
             let old_obj = SelectObject(hdc_mem, hbm as HGDIOBJ);
 
-            // Copy screen contents to memory DC
-            let blt_res = BitBlt(hdc_mem, 0, 0, width, height, hdc_screen, 0, 0, SRCCOPY);
+            // Copy screen contents to memory DC with CAPTUREBLT for DirectX and layered window support
+            let blt_res = BitBlt(hdc_mem, 0, 0, width, height, hdc_screen, 0, 0, SRCCOPY | CAPTUREBLT);
 
             let mut buffer = vec![0u8; (width * height * 4) as usize];
 
@@ -130,7 +132,7 @@ impl ScreenCapture {
 
             let old_obj = SelectObject(hdc_mem, hbm as HGDIOBJ);
 
-            let blt_res = BitBlt(hdc_mem, 0, 0, w, h, hdc_screen, x, y, SRCCOPY);
+            let blt_res = BitBlt(hdc_mem, 0, 0, w, h, hdc_screen, x, y, SRCCOPY | CAPTUREBLT);
 
             let mut buffer = vec![0u8; (w * h * 4) as usize];
 

@@ -12,6 +12,9 @@ use app::ClickerApp;
 use precision_timer::PrecisionTimer;
 
 fn main() -> eframe::Result<()> {
+    unsafe {
+        winapi::um::winuser::SetProcessDPIAware();
+    }
     PrecisionTimer::init();
 
     let mut viewport = eframe::egui::ViewportBuilder::default()

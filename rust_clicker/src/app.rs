@@ -75,6 +75,8 @@ pub struct ClickerApp {
     pub window_search_query: String,
     pub window_status_msg: Option<String>,
 
+    pub unified_cfg: crate::engine::UnifiedConfig,
+
     // Live info
     pub cursor_x: i32,
     pub cursor_y: i32,
@@ -108,6 +110,7 @@ impl ClickerApp {
             panic_key_name: "F12".to_string(),
 
             advanced_cfg: AdvancedConfig::default(),
+            unified_cfg: crate::engine::UnifiedConfig::default(),
 
             mouse_cfg: MouseConfig::default(),
 
@@ -254,26 +257,8 @@ impl ClickerApp {
     }
 
     fn toggle_active_engine(&mut self) {
-        match self.active_tab {
-            ActiveTab::Mouse => {
-                self.engine.toggle_mouse(self.mouse_cfg.clone(), self.advanced_cfg.clone());
-            }
-            ActiveTab::Keyboard => {
-                self.engine.toggle_keyboard(self.kb_cfg.clone(), self.advanced_cfg.clone());
-            }
-            ActiveTab::Scroll => {
-                self.engine.toggle_scroll(self.scroll_cfg.clone(), self.advanced_cfg.clone());
-            }
-            ActiveTab::Points => {
-                self.engine.toggle_route(self.points.clone(), self.advanced_cfg.clone());
-            }
-            ActiveTab::Vision => {
-                self.engine.toggle_vision(self.vision_cfg.clone(), self.advanced_cfg.clone());
-            }
-            ActiveTab::Settings => {
-                self.engine.toggle_mouse(self.mouse_cfg.clone(), self.advanced_cfg.clone());
-            }
-        }
+        self.unified_cfg.window_target = self.advanced_cfg.window_target.clone();
+        self.engine.toggle_unified(self.unified_cfg.clone(), self.advanced_cfg.clone());
     }
 
     fn check_key_capture(&mut self) {
@@ -670,32 +655,30 @@ impl eframe::App for ClickerApp {
 
         ctx.set_visuals(visuals);
 
-        // Sidebar (Primer NavList style)
-        egui::SidePanel::left("sidebar_panel")
-            .resizable(false)
-            .exact_width(210.0)
-            .frame(egui::Frame::none().fill(Color32::from_rgba_unmultiplied(16, 20, 27, alpha))) // #10141B
+        // Top Brand Header Panel
+        egui::TopBottomPanel::top("top_brand_bar")
+            .exact_height(54.0)
+            .frame(egui::Frame::none().fill(Color32::from_rgba_unmultiplied(16, 20, 27, alpha)))
             .show(ctx, |ui| {
-                ui.add_space(18.0);
-
-                // Brand Header with Minimalist Orange Icon
-                ui.horizontal(|ui| {
+                ui.horizontal_centered(|ui| {
                     ui.add_space(16.0);
+
                     if let Some(tex) = &self.icon_texture {
                         ui.add(
                             egui::Image::new(tex)
-                                .fit_to_exact_size(Vec2::new(28.0, 28.0))
+                                .fit_to_exact_size(Vec2::new(30.0, 30.0))
                                 .rounding(Rounding::same(6.0)),
                         );
                     } else {
-                        ui.label(RichText::new("⚡").size(20.0).color(Color32::from_rgb(240, 136, 62)));
+                        ui.label(RichText::new("⚡").size(22.0).color(Color32::from_rgb(240, 136, 62)));
                     }
-                    ui.add_space(4.0);
+                    ui.add_space(8.0);
+
                     ui.vertical(|ui| {
                         ui.horizontal(|ui| {
                             ui.label(
-                                RichText::new("Автокликер")
-                                    .size(15.0)
+                                RichText::new("ClickerPro")
+                                    .size(16.0)
                                     .strong()
                                     .color(Color32::from_rgb(240, 246, 252)),
                             );
@@ -705,196 +688,51 @@ impl eframe::App for ClickerApp {
                                 .inner_margin(egui::Margin::symmetric(5.0, 1.0))
                                 .show(ui, |ui| {
                                     ui.label(
-                                        RichText::new("Pro")
+                                        RichText::new("Pro Rust")
                                             .size(9.5)
                                             .color(Color32::from_rgb(88, 166, 255)),
                                     );
                                 });
                         });
                         ui.label(
-                            RichText::new("Rust Edition")
+                            RichText::new("Игровой автокликер + Авто-поиск всплывающих кнопок")
                                 .size(11.0)
-                                .color(Color32::from_rgb(110, 118, 129)),
+                                .color(Color32::from_rgb(139, 148, 158)),
                         );
                     });
-                });
-
-                ui.add_space(16.0);
-                ui.separator();
-                ui.add_space(12.0);
-
-                let nav_items = [
-                    (ActiveTab::Mouse, "🖱️", "Мышь"),
-                    (ActiveTab::Keyboard, "⌨️", "Клавиатура"),
-                    (ActiveTab::Scroll, "📜", "Скролл"),
-                    (ActiveTab::Points, "🎯", "Маршрут точек"),
-                    (ActiveTab::Vision, "👁️", "Поиск кнопок"),
-                    (ActiveTab::Settings, "⚙️", "Расширенные"),
-                ];
-
-                for (tab, icon, label) in nav_items {
-                    let is_active = self.active_tab == tab;
-
-                    let bg_color = if is_active {
-                        Color32::from_rgb(33, 38, 45) // Primer active nav item #21262D
-                    } else {
-                        Color32::TRANSPARENT
-                    };
-
-                    let text_color = if is_active {
-                        Color32::from_rgb(240, 246, 252)
-                    } else {
-                        Color32::from_rgb(201, 209, 217)
-                    };
-
-                    ui.horizontal(|ui| {
-                        ui.add_space(12.0);
-                        // Left blue accent indicator for active item
-                        if is_active {
-                            ui.painter().rect_filled(
-                                egui::Rect::from_min_size(ui.cursor().min, Vec2::new(3.0, 36.0)),
-                                Rounding::same(2.0),
-                                Color32::from_rgb(88, 166, 255),
-                            );
-                        }
-
-                        let btn = egui::Button::new(
-                            RichText::new(format!("  {}  {}", icon, label))
-                                .size(13.0)
-                                .strong()
-                                .color(text_color),
-                        )
-                        .min_size(Vec2::new(180.0, 36.0))
-                        .rounding(Rounding::same(6.0))
-                        .fill(bg_color);
-
-                        if ui.add(btn).clicked() {
-                            self.active_tab = tab;
-                        }
-                    });
-                    ui.add_space(4.0);
-                }
-
-                // Sidebar Bottom Status Card (Primer Box)
-                ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
-                    ui.add_space(16.0);
-
-                    egui::Frame::none()
-                        .fill(Color32::from_rgb(22, 27, 34))
-                        .rounding(Rounding::same(6.0))
-                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(48, 54, 61)))
-                        .inner_margin(12.0)
-                        .show(ui, |ui| {
-                            ui.set_width(180.0);
-                            let running = self.engine.is_running();
-
-                            ui.horizontal(|ui| {
-                                let (status_dot, status_text, color) = if running {
-                                    ("●", format!("Активен [{}]", self.toggle_key_name), Color32::from_rgb(46, 160, 67)) // Primer Success
-                                } else {
-                                    ("○", "Остановлен".to_string(), Color32::from_rgb(139, 148, 158))
-                                };
-                                ui.label(RichText::new(status_dot).size(13.0).color(color));
-                                ui.label(RichText::new(&status_text).size(12.0).strong().color(color));
-                            });
-
-                            ui.add_space(4.0);
-                            let total = self.engine.total_clicks.load(std::sync::atomic::Ordering::Relaxed);
-                            ui.horizontal(|ui| {
-                                ui.label(
-                                    RichText::new("Кликов:")
-                                        .size(11.0)
-                                        .color(Color32::from_rgb(139, 148, 158)),
-                                );
-                                ui.label(
-                                    RichText::new(format!("{}", total))
-                                        .size(11.5)
-                                        .strong()
-                                        .color(Color32::from_rgb(88, 166, 255)),
-                                );
-                            });
-                        });
-                });
-            });
-
-        // Bottom Action Deck (Primer Desktop Status Bar)
-        egui::TopBottomPanel::bottom("bottom_bar")
-            .exact_height(64.0)
-            .frame(egui::Frame::none().fill(Color32::from_rgb(16, 20, 27)))
-            .show(ctx, |ui| {
-                ui.horizontal_centered(|ui| {
-                    ui.add_space(20.0);
-
-                    let running = self.engine.is_running();
-                    let (btn_text, btn_fill, border_color) = if running {
-                        (
-                            format!("⏹  Остановить [{}]", self.toggle_key_name),
-                            Color32::from_rgb(218, 54, 51), // Primer Danger #DA3633
-                            Color32::from_rgb(248, 81, 73),
-                        )
-                    } else {
-                        (
-                            format!("▶  Запустить [{}]", self.toggle_key_name),
-                            Color32::from_rgb(35, 134, 54), // Primer Primary Green #238636
-                            Color32::from_rgb(46, 160, 67),
-                        )
-                    };
-
-                    let main_btn = egui::Button::new(
-                        RichText::new(btn_text)
-                            .size(13.5)
-                            .strong()
-                            .color(Color32::WHITE),
-                    )
-                    .min_size(Vec2::new(200.0, 38.0))
-                    .rounding(Rounding::same(6.0))
-                    .fill(btn_fill)
-                    .stroke(Stroke::new(1.0_f32, border_color));
-
-                    if ui.add(main_btn).clicked() {
-                        self.toggle_active_engine();
-                    }
-
-                    ui.add_space(18.0);
-
-                    // Coordinate chip
-                    egui::Frame::none()
-                        .fill(Color32::from_rgb(22, 27, 34))
-                        .rounding(Rounding::same(6.0))
-                        .inner_margin(egui::Margin::symmetric(12.0, 7.0))
-                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(48, 54, 61)))
-                        .show(ui, |ui| {
-                            ui.label(
-                                RichText::new(format!(
-                                    "Экран: X: {:<4}  Y: {:<4}",
-                                    self.cursor_x, self.cursor_y
-                                ))
-                                .size(11.5)
-                                .color(Color32::from_rgb(201, 209, 217)),
-                            );
-                        });
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.add_space(20.0);
+                        ui.add_space(16.0);
 
-                        let em_btn = egui::Button::new(
-                            RichText::new(format!("Экстренная остановка [{}]", self.panic_key_name))
-                                .size(11.5)
-                                .color(Color32::from_rgb(248, 81, 73)),
-                        )
-                        .min_size(Vec2::new(0.0, 32.0))
-                        .fill(Color32::from_rgb(33, 38, 45))
-                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(48, 54, 61)))
-                        .rounding(Rounding::same(6.0));
+                        // Always On Top Checkbox
+                        ui.checkbox(
+                            &mut self.advanced_cfg.always_on_top,
+                            RichText::new("📌 Поверх окон").size(11.5).color(Color32::from_rgb(201, 209, 217)),
+                        );
 
-                        if ui.add(em_btn).clicked() {
-                            self.engine.stop();
-                        }
+                        ui.add_space(12.0);
+
+                        // Cursor coordinates
+                        egui::Frame::none()
+                            .fill(Color32::from_rgb(22, 27, 34))
+                            .rounding(Rounding::same(6.0))
+                            .inner_margin(egui::Margin::symmetric(10.0, 5.0))
+                            .stroke(Stroke::new(1.0_f32, Color32::from_rgb(48, 54, 61)))
+                            .show(ui, |ui| {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "Курсор: X: {:<4} Y: {:<4}",
+                                        self.cursor_x, self.cursor_y
+                                    ))
+                                    .size(11.0)
+                                    .color(Color32::from_rgb(139, 148, 158)),
+                                );
+                            });
                     });
                 });
             });
 
-        // Central Content Area
+        // Main Unified Central Panel
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(Color32::from_rgb(13, 17, 23)))
             .show(ctx, |ui| {
@@ -903,94 +741,10 @@ impl eframe::App for ClickerApp {
                     .show(ui, |ui| {
                         ui.add_space(16.0);
                         ui.horizontal(|ui| {
-                            ui.add_space(18.0);
+                            ui.add_space(20.0);
                             ui.vertical(|ui| {
-                                ui.set_max_width(ui.available_width() - 18.0);
-
-                                // 1. Running Primer Flash Alert
-                                if self.engine.is_running() {
-                                    egui::Frame::none()
-                                        .fill(Color32::from_rgb(15, 45, 30))
-                                        .rounding(Rounding::same(6.0))
-                                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(46, 160, 67)))
-                                        .inner_margin(egui::Margin::symmetric(14.0, 8.0))
-                                        .show(ui, |ui| {
-                                            ui.horizontal(|ui| {
-                                                ui.label(
-                                                    RichText::new("● Кликер запущен и работает в фоне")
-                                                        .size(12.5)
-                                                        .strong()
-                                                        .color(Color32::from_rgb(63, 185, 80)),
-                                                );
-                                                ui.with_layout(
-                                                    egui::Layout::right_to_left(egui::Align::Center),
-                                                    |ui| {
-                                                        ui.label(
-                                                            RichText::new(format!(
-                                                                "Пауза: [{}]  •  Стоп: [{}]",
-                                                                self.toggle_key_name, self.panic_key_name
-                                                            ))
-                                                            .size(11.5)
-                                                            .color(Color32::from_rgb(126, 231, 135)),
-                                                        );
-                                                    },
-                                                );
-                                            });
-                                        });
-                                    ui.add_space(12.0);
-                                }
-
-                                // 2. GitHub Topic Badges Row (Presets)
-                                egui::Frame::none()
-                                    .fill(Color32::from_rgb(22, 27, 34))
-                                    .rounding(Rounding::same(6.0))
-                                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(48, 54, 61)))
-                                    .inner_margin(egui::Margin::symmetric(14.0, 8.0))
-                                    .show(ui, |ui| {
-                                        ui.horizontal_wrapped(|ui| {
-                                            ui.label(
-                                                RichText::new("Пресеты:")
-                                                    .size(12.0)
-                                                    .strong()
-                                                    .color(Color32::from_rgb(139, 148, 158)),
-                                            );
-                                            if primer_topic_badge(ui, "Minecraft PVP (16 CPS)") {
-                                                self.apply_preset("minecraft_pvp");
-                                            }
-                                            if primer_topic_badge(ui, "100 CPS") {
-                                                self.apply_preset("fast_100_cps");
-                                            }
-                                            if primer_topic_badge(ui, "Зажатие ЛКМ (350мс)") {
-                                                self.apply_preset("hold_attack");
-                                            }
-                                            if primer_topic_badge(ui, "Спам [Space]") {
-                                                self.apply_preset("space_spammer");
-                                            }
-                                            if primer_topic_badge(ui, "Удержание [E]") {
-                                                self.apply_preset("hold_e_key");
-                                            }
-                                            if primer_topic_badge(ui, "AFK-Скролл") {
-                                                self.apply_preset("afk_scroll");
-                                            }
-                                            if primer_topic_badge(ui, "👁️ Поиск кнопок") {
-                                                self.apply_preset("vision_fast");
-                                            }
-                                            if primer_topic_badge(ui, "🟣 Roblox Кружок x2") {
-                                                self.apply_preset("roblox_circle");
-                                            }
-                                        });
-                                    });
-
-                                ui.add_space(12.0);
-
-                                match self.active_tab {
-                                    ActiveTab::Mouse => self.render_mouse_tab(ui),
-                                    ActiveTab::Keyboard => self.render_keyboard_tab(ui),
-                                    ActiveTab::Scroll => self.render_scroll_tab(ui),
-                                    ActiveTab::Points => self.render_points_tab(ui),
-                                    ActiveTab::Vision => self.render_vision_tab(ui),
-                                    ActiveTab::Settings => self.render_settings_tab(ui),
-                                }
+                                ui.set_max_width(ui.available_width() - 20.0);
+                                self.render_unified_view(ui);
                             });
                         });
                         ui.add_space(20.0);
@@ -1000,6 +754,267 @@ impl eframe::App for ClickerApp {
 }
 
 impl ClickerApp {
+    fn render_unified_view(&mut self, ui: &mut egui::Ui) {
+        let running = self.engine.is_running();
+
+        // 1. Status Alert
+        if running {
+            egui::Frame::none()
+                .fill(Color32::from_rgb(15, 45, 30))
+                .rounding(Rounding::same(8.0))
+                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(46, 160, 67)))
+                .inner_margin(egui::Margin::symmetric(16.0, 10.0))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new("● КЛИКЕР АКТИВЕН И РАБОТАЕТ В ИГРЕ")
+                                .size(13.5)
+                                .strong()
+                                .color(Color32::from_rgb(63, 185, 80)),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let total = self.engine.total_clicks.load(std::sync::atomic::Ordering::Relaxed);
+                            ui.label(
+                                RichText::new(format!("Всего кликов: {}", total))
+                                    .size(12.5)
+                                    .strong()
+                                    .color(Color32::from_rgb(126, 231, 135)),
+                            );
+                            ui.label(
+                                RichText::new(format!("Пауза: [{}]  •  Стоп: [{}]  |  ", self.toggle_key_name, self.panic_key_name))
+                                    .size(12.0)
+                                    .color(Color32::from_rgb(139, 148, 158)),
+                            );
+                        });
+                    });
+                });
+            ui.add_space(10.0);
+        }
+
+        // 2. Giant Main Launch Button
+        let (btn_text, btn_fill, border_color) = if running {
+            (
+                format!("⏹  ОСТАНОВИТЬ КЛИКЕР [{}]", self.toggle_key_name),
+                Color32::from_rgb(218, 54, 51),
+                Color32::from_rgb(248, 81, 73),
+            )
+        } else {
+            (
+                format!("▶  ЗАПУСТИТЬ КЛИКЕР [{}]", self.toggle_key_name),
+                Color32::from_rgb(35, 134, 54),
+                Color32::from_rgb(46, 160, 67),
+            )
+        };
+
+        let main_btn = egui::Button::new(
+            RichText::new(btn_text)
+                .size(15.0)
+                .strong()
+                .color(Color32::WHITE),
+        )
+        .min_size(Vec2::new(ui.available_width(), 46.0))
+        .rounding(Rounding::same(8.0))
+        .fill(btn_fill)
+        .stroke(Stroke::new(1.0_f32, border_color));
+
+        if ui.add(main_btn).clicked() {
+            self.toggle_active_engine();
+        }
+
+        ui.add_space(14.0);
+
+        // Box 1: 🎯 Авто-поиск всплывающих кнопок
+        primer_box(
+            ui,
+            "🎯 Авто-поиск и клик по всплывающим кнопкам (Roblox x2 / Кружки)",
+            Some("кликер сам непрерывно сканирует экран и мгновенно кликает по кружкам"),
+            |ui| {
+                ui.horizontal(|ui| {
+                    ui.checkbox(
+                        &mut self.unified_cfg.hunter_enabled,
+                        RichText::new("Включить авто-поиск кнопок на экране (Roblox x2, бонусы, тапы)")
+                            .size(13.0)
+                            .strong()
+                            .color(Color32::from_rgb(240, 246, 252)),
+                    );
+                });
+
+                if self.unified_cfg.hunter_enabled {
+                    ui.add_space(10.0);
+                    ui.label(RichText::new("Что именно искать на экране:").size(12.5).color(Color32::from_rgb(139, 148, 158)));
+                    ui.add_space(6.0);
+
+                    ui.horizontal_wrapped(|ui| {
+                        let targets = [
+                            (PopupColorFilter::PurpleViolet, "🟣 Кружок Roblox (Фиолетовый x2 / Тап)"),
+                            (PopupColorFilter::AnyVibrant, "🌈 Любой яркий кружок / кнопка"),
+                            (PopupColorFilter::GoldYellow, "🟡 Золотые монеты / звёзды"),
+                            (PopupColorFilter::Green, "🟢 Зелёные кнопки"),
+                            (PopupColorFilter::Red, "🔴 Красные кнопки"),
+                            (PopupColorFilter::WhitePointerInside, "👆 Белая рука-указатель"),
+                        ];
+
+                        for (filter, label) in targets {
+                            let is_sel = self.unified_cfg.popup_filter == filter;
+                            let btn = egui::Button::new(
+                                RichText::new(label)
+                                    .size(12.0)
+                                    .color(if is_sel { Color32::WHITE } else { Color32::from_rgb(139, 148, 158) }),
+                            )
+                            .min_size(Vec2::new(0.0, 30.0))
+                            .rounding(Rounding::same(6.0))
+                            .fill(if is_sel { Color32::from_rgb(31, 111, 235) } else { Color32::from_rgb(33, 38, 45) })
+                            .stroke(Stroke::new(1.0_f32, if is_sel { Color32::from_rgb(88, 166, 255) } else { Color32::from_rgb(48, 54, 61) }));
+
+                            if ui.add(btn).clicked() {
+                                self.unified_cfg.popup_filter = filter;
+                            }
+                        }
+                    });
+
+                    ui.add_space(10.0);
+                    ui.separator();
+                    ui.add_space(8.0);
+
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut self.unified_cfg.return_cursor, "");
+                        ui.label(
+                            RichText::new("↩️ Возвращать курсор на исходное место после клика (прицел и обзор в игре не сбиваются)")
+                                .size(12.0)
+                                .color(Color32::from_rgb(201, 209, 217)),
+                        );
+                    });
+
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Время зажатия кнопки:").size(12.0).color(Color32::from_rgb(139, 148, 158)));
+                        ui.add(egui::DragValue::new(&mut self.unified_cfg.popup_hold_ms).speed(1.0).range(25.0..=200.0).suffix(" мс"));
+                        ui.label(
+                            RichText::new("(45 мс гарантирует 100% регистрацию клика в Roblox)")
+                                .size(11.0)
+                                .color(Color32::from_rgb(139, 148, 158)),
+                        );
+                    });
+                }
+            },
+        );
+
+        // Box 2: ⚡ Обычный авто-кликер
+        primer_box(
+            ui,
+            "⚡ Обычный авто-кликер в игре (пока нет всплывающих кнопок)",
+            Some("непрерывный фарм кликов в игре"),
+            |ui| {
+                ui.horizontal(|ui| {
+                    ui.checkbox(
+                        &mut self.unified_cfg.farm_enabled,
+                        RichText::new("Постоянно кликать в игре (авто-фарм)")
+                            .size(13.0)
+                            .strong()
+                            .color(Color32::from_rgb(240, 246, 252)),
+                    );
+                });
+
+                if self.unified_cfg.farm_enabled {
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Скорость кликов:").size(12.5).color(Color32::from_rgb(201, 209, 217)));
+                        ui.add(egui::Slider::new(&mut self.unified_cfg.farm_cps, 1.0..=50.0).text("CPS (кликов в сек)"));
+                    });
+
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Кнопка мыши:").size(12.0).color(Color32::from_rgb(139, 148, 158)));
+                        let is_left = self.unified_cfg.farm_button == MouseButton::Left;
+                        if ui.button(if is_left { "Левая (ЛКМ)" } else { "Правая (ПКМ)" }).clicked() {
+                            self.unified_cfg.farm_button = if is_left { MouseButton::Right } else { MouseButton::Left };
+                        }
+                    });
+                }
+            },
+        );
+
+        // Box 3: 🪟 Фоновый режим (привязка к окну)
+        self.render_window_target_card(ui);
+
+        // Box 4: ⌨️ Горячие клавиши
+        primer_box(
+            ui,
+            "⌨️ Горячие клавиши (настраиваемые)",
+            Some("управление кликером из любой игры"),
+            |ui| {
+                let rows: [(HotkeyAction, &str, &str, String, Color32); 2] = [
+                    (
+                        HotkeyAction::ToggleStartStop,
+                        "Запуск / Остановка (Toggle)",
+                        "Включает или ставит на паузу автокликер поверх любого окна или игры",
+                        self.toggle_key_name.clone(),
+                        Color32::from_rgb(88, 166, 255),
+                    ),
+                    (
+                        HotkeyAction::EmergencyStop,
+                        "Экстренная остановка (Panic)",
+                        "Немедленно глушит все процессы кликера",
+                        self.panic_key_name.clone(),
+                        Color32::from_rgb(248, 81, 73),
+                    ),
+                ];
+
+                for (action, title, desc, key_name, badge_color) in rows {
+                    let is_capturing = self.capturing_hotkey == Some(action);
+
+                    ui.horizontal(|ui| {
+                        egui::Frame::none()
+                            .fill(if is_capturing {
+                                Color32::from_rgb(210, 153, 34)
+                            } else {
+                                Color32::from_rgb(33, 38, 45)
+                            })
+                            .rounding(Rounding::same(6.0))
+                            .stroke(if is_capturing {
+                                Stroke::new(1.0_f32, Color32::from_rgb(240, 136, 62))
+                            } else {
+                                Stroke::new(1.0_f32, Color32::from_rgb(48, 54, 61))
+                            })
+                            .inner_margin(egui::Margin::symmetric(10.0, 4.0))
+                            .show(ui, |ui| {
+                                let label_text = if is_capturing {
+                                    "Нажмите клавишу...".to_string()
+                                } else {
+                                    key_name
+                                };
+                                ui.label(
+                                    RichText::new(label_text)
+                                        .size(13.0)
+                                        .strong()
+                                        .color(if is_capturing { Color32::BLACK } else { badge_color }),
+                                );
+                            });
+
+                        let btn_label = if is_capturing { "Отмена" } else { "Изменить" };
+                        let rebind_btn = egui::Button::new(RichText::new(btn_label).size(11.5))
+                            .min_size(Vec2::new(75.0, 26.0))
+                            .rounding(Rounding::same(5.0));
+
+                        if ui.add(rebind_btn).clicked() {
+                            if is_capturing {
+                                self.capturing_hotkey = None;
+                            } else {
+                                self.capturing_hotkey = Some(action);
+                            }
+                        }
+
+                        ui.vertical(|ui| {
+                            ui.label(RichText::new(title).size(12.5).strong().color(Color32::from_rgb(240, 246, 252)));
+                            ui.label(RichText::new(desc).size(11.0).color(Color32::from_rgb(139, 148, 158)));
+                        });
+                    });
+                    ui.add_space(8.0);
+                }
+            },
+        );
+    }
+
     fn render_window_target_card(&mut self, ui: &mut egui::Ui) {
         primer_box(
             ui,

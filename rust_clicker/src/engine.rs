@@ -6,7 +6,7 @@ use rand::Rng;
 
 use crate::precision_timer::PrecisionTimer;
 use crate::screen_capture::ScreenCapture;
-use crate::vision::{PopupDetector, VisionConfig, VisionEngine, VisionMode};
+use crate::vision::{PopupColorFilter, PopupDetector, VisionConfig, VisionEngine, VisionMode};
 use crate::win_input::{ClickType, MouseButton, WinInput};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,6 +165,53 @@ impl Default for WindowTargetConfig {
             click_center: true,
             custom_x: 0,
             custom_y: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnifiedConfig {
+    // 1. Popup Hunter
+    pub hunter_enabled: bool,
+    pub popup_filter: PopupColorFilter,
+    pub popup_min_size: i32,
+    pub popup_max_size: i32,
+    pub popup_hold_ms: f64,
+    pub return_cursor: bool,
+    pub popup_cooldown_ms: f64,
+
+    // 2. Continuous Farm Clicking
+    pub farm_enabled: bool,
+    pub farm_cps: f64,
+    pub farm_button: MouseButton,
+    pub farm_hold_ms: f64,
+
+    // 3. Background Game Window Lock (PostMessage)
+    pub window_target: WindowTargetConfig,
+
+    // 4. Scan frequency
+    pub scan_interval_ms: f64,
+}
+
+impl Default for UnifiedConfig {
+    fn default() -> Self {
+        Self {
+            hunter_enabled: true,
+            popup_filter: PopupColorFilter::PurpleViolet,
+            popup_min_size: 25,
+            popup_max_size: 240,
+            popup_hold_ms: 45.0,
+            return_cursor: true,
+            popup_cooldown_ms: 220.0,
+
+            farm_enabled: true,
+            farm_cps: 12.0,
+            farm_button: MouseButton::Left,
+            farm_hold_ms: 25.0,
+
+            window_target: WindowTargetConfig::default(),
+
+            scan_interval_ms: 25.0,
         }
     }
 }
@@ -948,6 +995,158 @@ impl EngineState {
                     } else {
                         PrecisionTimer::sleep_ms(50.0);
                     }
+                }
+
+                running.store(false, Ordering::Relaxed);
+            });
+        }
+    }
+
+    pub fn toggle_unified(&self, config: UnifiedConfig, adv: AdvancedConfig) {
+        if self.is_running() {
+            self.stop();
+        } else {
+            self.running.store(true, Ordering::Relaxed);
+            let running = self.running.clone();
+            let total = self.total_clicks.clone();
+
+            thread::spawn(move || {
+                let session_start = std::time::Instant::now();
+                let mut popup_detector = PopupDetector::new();
+                let mut last_farm_time = std::time::Instant::now();
+
+                while running.load(Ordering::Relaxed) {
+                    if adv.session_limit_enabled
+                        && session_start.elapsed().as_secs() >= adv.session_limit_seconds
+                    {
+                        break;
+                    }
+
+                    let is_bg = config.window_target.enabled
+                        && config.window_target.hwnd != 0
+                        && WinInput::is_window_valid(config.window_target.hwnd);
+                    let target_hwnd = if is_bg { config.window_target.hwnd } else { 0 };
+
+                    let (cur_x, cur_y) = WinInput::get_cursor_pos();
+                    if !is_bg && adv.corner_panic && cur_x <= 5 && cur_y <= 5 {
+                        break;
+                    }
+
+                    let mut popup_clicked = false;
+
+                    // 1. Popup Hunter Step (Direct Real-time Screen Target Recognition)
+                    if config.hunter_enabled {
+                        let (screen_opt, offset_x, offset_y) = if is_bg {
+                            match ScreenCapture::capture_window(target_hwnd) {
+                                Some(cap) => (Some(cap), 0, 0),
+                                None => {
+                                    if let Some((l, t, r, b)) = WinInput::get_window_screen_rect(target_hwnd) {
+                                        let w = (r - l).max(1);
+                                        let h = (b - t).max(1);
+                                        (ScreenCapture::capture_rect(l, t, w, h), l, t)
+                                    } else {
+                                        (ScreenCapture::capture_screen(), 0, 0)
+                                    }
+                                }
+                            }
+                        } else {
+                            (ScreenCapture::capture_screen(), 0, 0)
+                        };
+
+                        if let Some(screen) = screen_opt {
+                            let vision_cfg = VisionConfig {
+                                mode: VisionMode::AutoPopup,
+                                popup_min_size: config.popup_min_size,
+                                popup_max_size: config.popup_max_size,
+                                popup_sensitivity: 40,
+                                popup_filter: config.popup_filter,
+                                ..Default::default()
+                            };
+
+                            if let Some((target_x, target_y)) =
+                                popup_detector.detect_popup(&screen, &vision_cfg)
+                            {
+                                let orig_pos = WinInput::get_cursor_pos();
+                                let final_x = target_x + offset_x;
+                                let final_y = target_y + offset_y;
+
+                                if is_bg {
+                                    let (client_x, client_y) = if offset_x == 0 && offset_y == 0 {
+                                        (final_x, final_y)
+                                    } else {
+                                        WinInput::screen_to_client(target_hwnd, final_x, final_y)
+                                            .unwrap_or((final_x, final_y))
+                                    };
+
+                                    WinInput::post_mouse_click_to_window(
+                                        target_hwnd,
+                                        client_x,
+                                        client_y,
+                                        MouseButton::Left,
+                                        ClickType::Single,
+                                        config.popup_hold_ms,
+                                    );
+                                } else {
+                                    WinInput::set_cursor_pos(final_x, final_y);
+                                    PrecisionTimer::sleep_ms(6.0); // Allow OS and game to register hover
+
+                                    let hold = config.popup_hold_ms.max(35.0);
+                                    WinInput::mouse_down(MouseButton::Left);
+                                    PrecisionTimer::sleep_ms(hold);
+                                    WinInput::mouse_up(MouseButton::Left);
+
+                                    if config.return_cursor {
+                                        PrecisionTimer::sleep_ms(5.0);
+                                        WinInput::set_cursor_pos(orig_pos.0, orig_pos.1);
+                                    }
+                                }
+
+                                total.fetch_add(1, Ordering::Relaxed);
+                                popup_clicked = true;
+                                popup_detector.reset();
+                                PrecisionTimer::sleep_ms(config.popup_cooldown_ms.max(50.0));
+                            }
+                        }
+                    }
+
+                    // 2. Continuous Farm Clicking Step (when no pop-up button is active)
+                    if !popup_clicked && config.farm_enabled {
+                        let farm_delay_ms = if config.farm_cps > 0.0 {
+                            1000.0 / config.farm_cps
+                        } else {
+                            80.0
+                        };
+
+                        if last_farm_time.elapsed().as_secs_f64() * 1000.0 >= farm_delay_ms {
+                            if is_bg {
+                                let (client_x, client_y) = if config.window_target.click_center {
+                                    WinInput::get_window_client_rect(target_hwnd)
+                                        .map(|(_, _, w, h)| (w / 2, h / 2))
+                                        .unwrap_or((100, 100))
+                                } else {
+                                    (config.window_target.custom_x, config.window_target.custom_y)
+                                };
+
+                                WinInput::post_mouse_click_to_window(
+                                    target_hwnd,
+                                    client_x,
+                                    client_y,
+                                    config.farm_button,
+                                    ClickType::Single,
+                                    config.farm_hold_ms,
+                                );
+                            } else {
+                                WinInput::mouse_down(config.farm_button);
+                                PrecisionTimer::sleep_ms(config.farm_hold_ms.max(15.0));
+                                WinInput::mouse_up(config.farm_button);
+                            }
+
+                            total.fetch_add(1, Ordering::Relaxed);
+                            last_farm_time = std::time::Instant::now();
+                        }
+                    }
+
+                    PrecisionTimer::sleep_ms(config.scan_interval_ms.max(10.0));
                 }
 
                 running.store(false, Ordering::Relaxed);
