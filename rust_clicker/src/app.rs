@@ -67,6 +67,14 @@ pub struct ClickerApp {
     // Embedded icon texture
     pub icon_texture: Option<egui::TextureHandle>,
 
+    // Target window / background clicking state
+    pub picking_window_target: bool,
+    pub picking_window_point: bool,
+    pub open_windows: Vec<crate::win_input::WindowInfo>,
+    pub show_window_picker: bool,
+    pub window_search_query: String,
+    pub window_status_msg: Option<String>,
+
     // Live info
     pub cursor_x: i32,
     pub cursor_y: i32,
@@ -132,6 +140,13 @@ impl ClickerApp {
             template_textures: std::collections::HashMap::new(),
 
             icon_texture,
+
+            picking_window_target: false,
+            picking_window_point: false,
+            open_windows: Vec::new(),
+            show_window_picker: false,
+            window_search_query: String::new(),
+            window_status_msg: None,
 
             cursor_x: cx,
             cursor_y: cy,
@@ -532,7 +547,33 @@ impl eframe::App for ClickerApp {
                     self.toggle_active_engine();
                 }
                 HotkeyEvent::PickCoordinate => {
-                    if self.active_tab == ActiveTab::Mouse {
+                    if self.picking_window_target {
+                        if let Some(win) = WinInput::get_window_at_point(cx, cy) {
+                            self.advanced_cfg.window_target.hwnd = win.hwnd;
+                            self.advanced_cfg.window_target.title = win.title.clone();
+                            self.advanced_cfg.window_target.enabled = true;
+                            self.picking_window_target = false;
+                            self.window_status_msg = Some(format!(
+                                "✓ Привязано к окну: «{}» ({}×{})",
+                                win.title, win.width, win.height
+                            ));
+                        }
+                    } else if self.picking_window_point {
+                        if self.advanced_cfg.window_target.hwnd != 0 {
+                            if let Some((client_x, client_y)) =
+                                WinInput::screen_to_client(self.advanced_cfg.window_target.hwnd, cx, cy)
+                            {
+                                self.advanced_cfg.window_target.custom_x = client_x;
+                                self.advanced_cfg.window_target.custom_y = client_y;
+                                self.advanced_cfg.window_target.click_center = false;
+                                self.picking_window_point = false;
+                                self.window_status_msg = Some(format!(
+                                    "✓ Точка внутри окна зафиксирована: ({}, {})",
+                                    client_x, client_y
+                                ));
+                            }
+                        }
+                    } else if self.active_tab == ActiveTab::Mouse {
                         self.mouse_cfg.target_x = cx;
                         self.mouse_cfg.target_y = cy;
                         self.mouse_cfg.fixed_pos = true;
@@ -919,7 +960,371 @@ impl eframe::App for ClickerApp {
 }
 
 impl ClickerApp {
+    fn render_window_target_card(&mut self, ui: &mut egui::Ui) {
+        primer_box(
+            ui,
+            "🪟 Фоновый режим: Клики строго в окно игры (Background Game Lock)",
+            Some("клики происходят только внутри выбранной игры через Win32 API — мышь свободна, окно может быть перекрыто"),
+            |ui| {
+                let mut bg_enabled = self.advanced_cfg.window_target.enabled;
+                if ui
+                    .checkbox(
+                        &mut bg_enabled,
+                        RichText::new("Включить фоновый режим (клики строго в окно игры, курсор мыши свободен)")
+                            .strong()
+                            .color(Color32::from_rgb(240, 246, 252)),
+                    )
+                    .changed()
+                {
+                    self.advanced_cfg.window_target.enabled = bg_enabled;
+                    if bg_enabled && self.open_windows.is_empty() {
+                        self.open_windows = WinInput::list_open_windows();
+                    }
+                }
+
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new("💡 Если включено: автокликер отправляет клики напрямую в игру через Win32 API. Вы можете положить поверх любое другое окно (браузер, видео, чат), печатать или скроллить — клики не попадут в другие приложения!")
+                        .size(11.5)
+                        .color(Color32::from_rgb(139, 148, 158)),
+                );
+
+                if self.advanced_cfg.window_target.enabled {
+                    ui.add_space(10.0);
+
+                    // Notification banner if any
+                    if let Some(ref msg) = self.window_status_msg {
+                        egui::Frame::none()
+                            .fill(Color32::from_rgb(15, 35, 25))
+                            .rounding(Rounding::same(6.0))
+                            .stroke(Stroke::new(1.0_f32, Color32::from_rgb(46, 160, 67)))
+                            .inner_margin(egui::Margin::symmetric(12.0, 8.0))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new(msg)
+                                            .size(12.0)
+                                            .color(Color32::from_rgb(63, 185, 80)),
+                                    );
+                                });
+                            });
+                        ui.add_space(8.0);
+                    }
+
+                    // Window binding indicator
+                    let hwnd = self.advanced_cfg.window_target.hwnd;
+                    let is_bound = hwnd != 0 && WinInput::is_window_valid(hwnd);
+
+                    egui::Frame::none()
+                        .fill(if is_bound {
+                            Color32::from_rgb(13, 27, 42)
+                        } else {
+                            Color32::from_rgb(38, 26, 12)
+                        })
+                        .rounding(Rounding::same(6.0))
+                        .stroke(Stroke::new(
+                            1.0_f32,
+                            if is_bound {
+                                Color32::from_rgb(31, 111, 235)
+                            } else {
+                                Color32::from_rgb(210, 153, 34)
+                            },
+                        ))
+                        .inner_margin(egui::Margin::symmetric(14.0, 10.0))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                if is_bound {
+                                    ui.label(
+                                        RichText::new("🟢 Привязано к:")
+                                            .size(13.0)
+                                            .strong()
+                                            .color(Color32::from_rgb(88, 166, 255)),
+                                    );
+                                    ui.label(
+                                        RichText::new(&self.advanced_cfg.window_target.title)
+                                            .size(13.0)
+                                            .strong()
+                                            .color(Color32::WHITE),
+                                    );
+                                    if let Some((_, _, w, h)) = WinInput::get_window_client_rect(hwnd) {
+                                        ui.label(
+                                            RichText::new(format!("({}×{})", w, h))
+                                                .size(12.0)
+                                                .color(Color32::from_rgb(139, 148, 158)),
+                                        );
+                                    }
+                                } else {
+                                    ui.label(
+                                        RichText::new("⚠️ Игра не выбрана!")
+                                            .size(13.0)
+                                            .strong()
+                                            .color(Color32::from_rgb(227, 179, 65)),
+                                    );
+                                    ui.label(
+                                        RichText::new("Нажмите «Захватить окно» или выберите из списка запущенных окон ниже.")
+                                            .size(12.0)
+                                            .color(Color32::from_rgb(201, 209, 217)),
+                                    );
+                                }
+                            });
+                        });
+
+                    ui.add_space(10.0);
+
+                    // Action Buttons
+                    ui.horizontal(|ui| {
+                        let pick_btn_text = if self.picking_window_target {
+                            format!("⏳ Наведите мышь на окно игры и нажмите [{}]", self.pick_key_name)
+                        } else {
+                            format!("🎯 Захватить окно игры [{}]", self.pick_key_name)
+                        };
+
+                        let pick_btn = egui::Button::new(
+                            RichText::new(pick_btn_text)
+                                .size(12.5)
+                                .strong()
+                                .color(Color32::WHITE),
+                        )
+                        .min_size(Vec2::new(0.0, 32.0))
+                        .fill(if self.picking_window_target {
+                            Color32::from_rgb(187, 128, 9)
+                        } else {
+                            Color32::from_rgb(35, 134, 54)
+                        })
+                        .rounding(Rounding::same(6.0));
+
+                        if ui.add(pick_btn).clicked() {
+                            if self.picking_window_target {
+                                self.picking_window_target = false;
+                            } else {
+                                self.picking_window_target = true;
+                                self.window_status_msg = Some(format!(
+                                    "Наведите курсор на окно вашей игры и нажмите клавишу [{}]",
+                                    self.pick_key_name
+                                ));
+                            }
+                        }
+
+                        ui.add_space(6.0);
+
+                        let list_btn = egui::Button::new(
+                            RichText::new(if self.show_window_picker {
+                                "✕ Скрыть список"
+                            } else {
+                                "📋 Выбрать из списка окон"
+                            })
+                            .size(12.0)
+                            .color(Color32::from_rgb(201, 209, 217)),
+                        )
+                        .min_size(Vec2::new(0.0, 32.0))
+                        .fill(Color32::from_rgb(33, 38, 45))
+                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(48, 54, 61)))
+                        .rounding(Rounding::same(6.0));
+
+                        if ui.add(list_btn).clicked() {
+                            self.show_window_picker = !self.show_window_picker;
+                            if self.show_window_picker {
+                                self.open_windows = WinInput::list_open_windows();
+                            }
+                        }
+
+                        if is_bound {
+                            ui.add_space(6.0);
+                            if ui
+                                .button(
+                                    RichText::new("Сбросить")
+                                        .size(11.5)
+                                        .color(Color32::from_rgb(248, 81, 73)),
+                                )
+                                .clicked()
+                            {
+                                self.advanced_cfg.window_target.hwnd = 0;
+                                self.advanced_cfg.window_target.title.clear();
+                                self.window_status_msg = Some("Привязка к окну сброшена.".to_string());
+                            }
+                        }
+                    });
+
+                    // Dropdown list of running windows
+                    if self.show_window_picker {
+                        ui.add_space(8.0);
+                        egui::Frame::none()
+                            .fill(Color32::from_rgb(22, 27, 34))
+                            .rounding(Rounding::same(6.0))
+                            .stroke(Stroke::new(1.0_f32, Color32::from_rgb(48, 54, 61)))
+                            .inner_margin(10.0)
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new("Поиск:").size(12.0).color(Color32::from_rgb(139, 148, 158)),
+                                    );
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut self.window_search_query)
+                                            .hint_text("Название игры или программы...")
+                                            .desired_width(220.0),
+                                    );
+                                    if ui.button("🔄 Обновить").clicked() {
+                                        self.open_windows = WinInput::list_open_windows();
+                                    }
+                                });
+
+                                ui.add_space(6.0);
+                                let query = self.window_search_query.to_lowercase();
+                                let filtered: Vec<_> = self
+                                    .open_windows
+                                    .iter()
+                                    .filter(|w| query.is_empty() || w.title.to_lowercase().contains(&query))
+                                    .cloned()
+                                    .collect();
+
+                                if filtered.is_empty() {
+                                    ui.label(
+                                        RichText::new("Окна не найдены. Убедитесь, что игра запущена и открыта на панели задач.")
+                                            .size(11.5)
+                                            .color(Color32::from_rgb(139, 148, 158)),
+                                    );
+                                } else {
+                                    egui::ScrollArea::vertical()
+                                        .max_height(170.0)
+                                        .show(ui, |ui| {
+                                            for win in filtered {
+                                                ui.horizontal(|ui| {
+                                                    let is_current =
+                                                        win.hwnd == self.advanced_cfg.window_target.hwnd;
+                                                    let title_display = if win.title.len() > 46 {
+                                                        format!("{}...", &win.title[..43])
+                                                    } else {
+                                                        win.title.clone()
+                                                    };
+
+                                                    let pick_btn = ui.button(
+                                                        RichText::new(if is_current {
+                                                            "✓ Выбрано"
+                                                        } else {
+                                                            "Выбрать"
+                                                        })
+                                                        .size(11.5)
+                                                        .color(if is_current {
+                                                            Color32::from_rgb(63, 185, 80)
+                                                        } else {
+                                                            Color32::from_rgb(88, 166, 255)
+                                                        }),
+                                                    );
+
+                                                    if pick_btn.clicked() {
+                                                        self.advanced_cfg.window_target.hwnd = win.hwnd;
+                                                        self.advanced_cfg.window_target.title = win.title.clone();
+                                                        self.advanced_cfg.window_target.enabled = true;
+                                                        self.show_window_picker = false;
+                                                        self.window_status_msg = Some(format!(
+                                                            "✓ Выбрано окно: «{}» ({}×{})",
+                                                            win.title, win.width, win.height
+                                                        ));
+                                                    }
+
+                                                    ui.label(
+                                                        RichText::new(title_display)
+                                                            .size(12.0)
+                                                            .strong()
+                                                            .color(if is_current {
+                                                                Color32::WHITE
+                                                            } else {
+                                                                Color32::from_rgb(201, 209, 217)
+                                                            }),
+                                                    );
+                                                    ui.label(
+                                                        RichText::new(format!("({}×{})", win.width, win.height))
+                                                            .size(11.0)
+                                                            .color(Color32::from_rgb(139, 148, 158)),
+                                                    );
+                                                });
+                                                ui.separator();
+                                            }
+                                        });
+                                }
+                            });
+                    }
+
+                    // Click point inside the window
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(8.0);
+
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new("Точка клика в окне:")
+                                .size(12.5)
+                                .color(Color32::from_rgb(201, 209, 217)),
+                        );
+                        ui.radio_value(
+                            &mut self.advanced_cfg.window_target.click_center,
+                            true,
+                            "🎯 В центр окна игры",
+                        );
+                        ui.radio_value(
+                            &mut self.advanced_cfg.window_target.click_center,
+                            false,
+                            "📍 В точные координаты окна",
+                        );
+                    });
+
+                    if !self.advanced_cfg.window_target.click_center {
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("X (от левого края окна):").size(11.5));
+                            ui.add(
+                                egui::DragValue::new(&mut self.advanced_cfg.window_target.custom_x)
+                                    .speed(1)
+                                    .range(0..=4000)
+                                    .suffix(" px"),
+                            );
+                            ui.label(RichText::new("Y (от верхнего края окна):").size(11.5));
+                            ui.add(
+                                egui::DragValue::new(&mut self.advanced_cfg.window_target.custom_y)
+                                    .speed(1)
+                                    .range(0..=4000)
+                                    .suffix(" px"),
+                            );
+
+                            ui.add_space(8.0);
+                            let pt_text = if self.picking_window_point {
+                                format!("⏳ Наведите в игре и нажмите [{}]", self.pick_key_name)
+                            } else {
+                                format!("📍 Указать точку в игре [{}]", self.pick_key_name)
+                            };
+
+                            let pt_btn = egui::Button::new(
+                                RichText::new(pt_text)
+                                    .size(11.5)
+                                    .color(Color32::from_rgb(88, 166, 255)),
+                            )
+                            .fill(Color32::from_rgb(33, 38, 45))
+                            .stroke(Stroke::new(1.0_f32, Color32::from_rgb(48, 54, 61)))
+                            .rounding(Rounding::same(5.0));
+
+                            if ui.add(pt_btn).clicked() {
+                                if self.picking_window_point {
+                                    self.picking_window_point = false;
+                                } else {
+                                    self.picking_window_point = true;
+                                    self.window_status_msg = Some(format!(
+                                        "Наведите курсор на желаемую точку внутри игры и нажмите [{}]",
+                                        self.pick_key_name
+                                    ));
+                                }
+                            }
+                        });
+                    }
+                }
+            },
+        );
+        ui.add_space(14.0);
+    }
+
     fn render_mouse_tab(&mut self, ui: &mut egui::Ui) {
+        // Фоновый режим: привязка кликов к игре
+        self.render_window_target_card(ui);
+
         // Box 1: Кнопка и действие
         primer_box(
             ui,
@@ -1487,6 +1892,33 @@ impl ClickerApp {
                 self.vision_cfg.mode = VisionMode::TemplateMatch;
             }
         });
+
+        if self.advanced_cfg.window_target.enabled && self.advanced_cfg.window_target.hwnd != 0 {
+            ui.add_space(8.0);
+            egui::Frame::none()
+                .fill(Color32::from_rgb(13, 27, 42))
+                .rounding(Rounding::same(6.0))
+                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(31, 111, 235)))
+                .inner_margin(egui::Margin::symmetric(14.0, 8.0))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new("🪟 Фоновый режим активен:")
+                                .size(12.0)
+                                .strong()
+                                .color(Color32::from_rgb(88, 166, 255)),
+                        );
+                        ui.label(
+                            RichText::new(format!(
+                                "«{}» — поиск и клики изолированы внутри окна игры, мышь свободна!",
+                                self.advanced_cfg.window_target.title
+                            ))
+                            .size(12.0)
+                            .color(Color32::WHITE),
+                        );
+                    });
+                });
+        }
 
         ui.add_space(12.0);
 
@@ -2384,42 +2816,8 @@ impl ClickerApp {
             },
         );
 
-        // Section 3: Target Window Filter
-        primer_box(
-            ui,
-            "🎯 Привязка к активному окну (Window Lock)",
-            Some("кликает только внутри конкретной игры или программы"),
-            |ui| {
-                ui.checkbox(
-                    &mut self.advanced_cfg.target_window_enabled,
-                    RichText::new("Привязка кликов к целевому окну")
-                        .strong()
-                        .color(Color32::from_rgb(240, 246, 252)),
-                );
-                ui.label(
-                    RichText::new("Если вы переключаетесь (Alt+Tab) в другое окно (браузер, Discord), кликер автоматически ставится на паузу и возобновляется при возвращении в игру.")
-                        .size(11.5)
-                        .color(Color32::from_rgb(139, 148, 158)),
-                );
-
-                if self.advanced_cfg.target_window_enabled {
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        ui.label("Целевой заголовок:");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.advanced_cfg.target_window_title)
-                                .hint_text("например: Minecraft, Roblox, Chrome"),
-                        );
-                        if ui.button("🎯 Захватить окно").clicked() {
-                            let title = WinInput::get_active_window_title();
-                            if !title.is_empty() {
-                                self.advanced_cfg.target_window_title = title;
-                            }
-                        }
-                    });
-                }
-            },
-        );
+        // Section 3: Background Window Mode & Game Lock
+        self.render_window_target_card(ui);
 
         // Section 4: Human Simulation & Anti-Detection
         primer_box(

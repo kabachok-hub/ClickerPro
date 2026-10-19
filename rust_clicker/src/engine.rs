@@ -140,9 +140,33 @@ pub struct AdvancedConfig {
     pub micro_drift: bool,
     pub micro_drift_px: i32,
 
-    // Target process/window lock
+    // Target process/window lock & background clicking
+    pub window_target: WindowTargetConfig,
     pub target_window_enabled: bool,
     pub target_window_title: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowTargetConfig {
+    pub enabled: bool,
+    pub hwnd: usize,
+    pub title: String,
+    pub click_center: bool,
+    pub custom_x: i32,
+    pub custom_y: i32,
+}
+
+impl Default for WindowTargetConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            hwnd: 0,
+            title: String::new(),
+            click_center: true,
+            custom_x: 0,
+            custom_y: 0,
+        }
+    }
 }
 
 impl Default for AdvancedConfig {
@@ -163,6 +187,7 @@ impl Default for AdvancedConfig {
             micro_drift: false,
             micro_drift_px: 2,
 
+            window_target: WindowTargetConfig::default(),
             target_window_enabled: false,
             target_window_title: String::new(),
         }
@@ -233,14 +258,14 @@ impl EngineState {
                         break;
                     }
 
-                    // 3. Screen corner panic (0,0)
+                    // 3. Screen corner panic (0,0) - only for global cursor mode
                     let (cur_x, cur_y) = WinInput::get_cursor_pos();
-                    if adv.corner_panic && cur_x <= 5 && cur_y <= 5 {
+                    if !adv.window_target.enabled && adv.corner_panic && cur_x <= 5 && cur_y <= 5 {
                         break;
                     }
 
-                    // 4. Mouse movement failsafe (user physically grabbed mouse)
-                    if adv.failsafe_mouse_move && clicks_done > 0 {
+                    // 4. Mouse movement failsafe (user physically grabbed mouse) - only for global cursor mode
+                    if !adv.window_target.enabled && adv.failsafe_mouse_move && clicks_done > 0 {
                         let dx = (cur_x - last_pos.0).abs();
                         let dy = (cur_y - last_pos.1).abs();
                         if dx > adv.mouse_move_threshold || dy > adv.mouse_move_threshold {
@@ -248,7 +273,73 @@ impl EngineState {
                         }
                     }
 
-                    // 5. Target active window filter
+                    // 5. Background Window Mode (isolated to game window via PostMessageW)
+                    if adv.window_target.enabled && adv.window_target.hwnd != 0 {
+                        let hwnd = adv.window_target.hwnd;
+                        if !WinInput::is_window_valid(hwnd) {
+                            PrecisionTimer::sleep_ms(150.0);
+                            continue;
+                        }
+
+                        let (mut px, mut py) = if adv.window_target.click_center {
+                            if let Some((_, _, w, h)) = WinInput::get_window_client_rect(hwnd) {
+                                (w / 2, h / 2)
+                            } else {
+                                (100, 100)
+                            }
+                        } else if config.fixed_pos {
+                            (config.target_x, config.target_y)
+                        } else {
+                            (adv.window_target.custom_x, adv.window_target.custom_y)
+                        };
+
+                        if config.jitter_px > 0 {
+                            px += rng.gen_range(-config.jitter_px..=config.jitter_px);
+                            py += rng.gen_range(-config.jitter_px..=config.jitter_px);
+                        }
+
+                        let hold_ms = if adv.human_hold_duration {
+                            let j = calculate_jitter(&mut rng, 8.0, adv.gaussian_jitter);
+                            (adv.natural_hold_ms + j).clamp(10.0, 95.0)
+                        } else if config.click_type == ClickType::Hold {
+                            config.hold_duration_ms
+                        } else {
+                            0.0
+                        };
+
+                        WinInput::post_mouse_click_to_window(
+                            hwnd,
+                            px,
+                            py,
+                            config.button,
+                            config.click_type,
+                            hold_ms,
+                        );
+
+                        clicks_done += 1;
+                        total.fetch_add(1, Ordering::Relaxed);
+
+                        let base_delay = if config.use_cps {
+                            if config.cps > 0.0 {
+                                1000.0 / config.cps
+                            } else {
+                                50.0
+                            }
+                        } else {
+                            config.custom_interval_ms
+                        };
+
+                        let mut delay = base_delay;
+                        if config.jitter_ms > 0.0 {
+                            let j = calculate_jitter(&mut rng, config.jitter_ms, adv.gaussian_jitter);
+                            delay = (delay + j).max(1.0);
+                        }
+
+                        PrecisionTimer::sleep_ms(delay);
+                        continue;
+                    }
+
+                    // 6. Target active window filter (for global cursor mode)
                     if adv.target_window_enabled && !adv.target_window_title.trim().is_empty() {
                         let active_title = WinInput::get_active_window_title();
                         if !active_title
@@ -367,13 +458,36 @@ impl EngineState {
                         break;
                     }
 
-                    // Screen corner panic (0,0)
+                    // Screen corner panic (0,0) - only for global mode
                     let (cur_x, cur_y) = WinInput::get_cursor_pos();
-                    if adv.corner_panic && cur_x <= 5 && cur_y <= 5 {
+                    if !adv.window_target.enabled && adv.corner_panic && cur_x <= 5 && cur_y <= 5 {
                         break;
                     }
 
-                    // Target window filter
+                    // Background window key dispatch
+                    if adv.window_target.enabled && adv.window_target.hwnd != 0 {
+                        let hwnd = adv.window_target.hwnd;
+                        if !WinInput::is_window_valid(hwnd) {
+                            PrecisionTimer::sleep_ms(150.0);
+                            continue;
+                        }
+                        let hold_ms = if config.mode == KeyMode::Hold { config.hold_ms } else { 0.0 };
+                        WinInput::post_key_tap_to_window(hwnd, config.vk_code, hold_ms);
+
+                        count += 1;
+                        total.fetch_add(1, Ordering::Relaxed);
+
+                        let mut delay = config.interval_ms;
+                        if config.jitter_ms > 0.0 {
+                            let j = calculate_jitter(&mut rng, config.jitter_ms, adv.gaussian_jitter);
+                            delay = (delay + j).max(1.0);
+                        }
+
+                        PrecisionTimer::sleep_ms(delay);
+                        continue;
+                    }
+
+                    // Target window filter (for global mode)
                     if adv.target_window_enabled && !adv.target_window_title.trim().is_empty() {
                         let active_title = WinInput::get_active_window_title();
                         if !active_title
@@ -492,8 +606,30 @@ impl EngineState {
                     }
 
                     let (cur_x, cur_y) = WinInput::get_cursor_pos();
-                    if adv.corner_panic && cur_x <= 5 && cur_y <= 5 {
+                    if !adv.window_target.enabled && adv.corner_panic && cur_x <= 5 && cur_y <= 5 {
                         break;
+                    }
+
+                    // Background window mode for route points
+                    if adv.window_target.enabled && adv.window_target.hwnd != 0 {
+                        let hwnd = adv.window_target.hwnd;
+                        if !WinInput::is_window_valid(hwnd) {
+                            PrecisionTimer::sleep_ms(150.0);
+                            continue;
+                        }
+                        let pt = &points[idx];
+                        WinInput::post_mouse_click_to_window(
+                            hwnd,
+                            pt.x,
+                            pt.y,
+                            pt.button,
+                            ClickType::Single,
+                            pt.hold_ms,
+                        );
+                        total.fetch_add(1, Ordering::Relaxed);
+                        PrecisionTimer::sleep_ms(pt.delay_after_ms.max(10.0));
+                        idx = (idx + 1) % points.len();
+                        continue;
                     }
 
                     if adv.target_window_enabled && !adv.target_window_title.trim().is_empty() {
@@ -549,12 +685,15 @@ impl EngineState {
                         break;
                     }
 
+                    let is_bg = adv.window_target.enabled && adv.window_target.hwnd != 0;
+                    let target_hwnd = if is_bg { adv.window_target.hwnd } else { 0 };
+
                     let (cur_x, cur_y) = WinInput::get_cursor_pos();
-                    if adv.corner_panic && cur_x <= 5 && cur_y <= 5 {
+                    if !is_bg && adv.corner_panic && cur_x <= 5 && cur_y <= 5 {
                         break;
                     }
 
-                    if adv.target_window_enabled && !adv.target_window_title.trim().is_empty() {
+                    if !is_bg && adv.target_window_enabled && !adv.target_window_title.trim().is_empty() {
                         let active_title = WinInput::get_active_window_title();
                         if !active_title
                             .to_lowercase()
@@ -565,7 +704,38 @@ impl EngineState {
                         }
                     }
 
-                    if let Some(screen) = ScreenCapture::capture_screen() {
+                    let (screen_opt, offset_x, offset_y) = if is_bg {
+                        if !WinInput::is_window_valid(target_hwnd) {
+                            PrecisionTimer::sleep_ms(150.0);
+                            continue;
+                        }
+                        match ScreenCapture::capture_window(target_hwnd) {
+                            Some(cap) => (Some(cap), 0, 0),
+                            None => {
+                                if let Some((l, t, r, b)) = WinInput::get_window_screen_rect(target_hwnd) {
+                                    let w = (r - l).max(1);
+                                    let h = (b - t).max(1);
+                                    (ScreenCapture::capture_rect(l, t, w, h), l, t)
+                                } else {
+                                    (ScreenCapture::capture_screen(), 0, 0)
+                                }
+                            }
+                        }
+                    } else if config.use_custom_region {
+                        let rx = config.region_x1.min(config.region_x2);
+                        let ry = config.region_y1.min(config.region_y2);
+                        let rw = (config.region_x1 - config.region_x2).abs();
+                        let rh = (config.region_y1 - config.region_y2).abs();
+                        if rw > 10 && rh > 10 {
+                            (ScreenCapture::capture_rect(rx, ry, rw, rh), rx, ry)
+                        } else {
+                            (ScreenCapture::capture_screen(), 0, 0)
+                        }
+                    } else {
+                        (ScreenCapture::capture_screen(), 0, 0)
+                    };
+
+                    if let Some(screen) = screen_opt {
                         let mut clicked = false;
 
                         match config.mode {
@@ -589,43 +759,70 @@ impl EngineState {
                                     let final_x = target_x + jx;
                                     let final_y = target_y + jy;
 
-                                    WinInput::set_cursor_pos(final_x, final_y);
+                                    if is_bg {
+                                        let client_x = if offset_x == 0 && offset_y == 0 {
+                                            final_x
+                                        } else {
+                                            WinInput::screen_to_client(target_hwnd, final_x + offset_x, final_y + offset_y)
+                                                .map(|(x, _)| x)
+                                                .unwrap_or(final_x)
+                                        };
+                                        let client_y = if offset_x == 0 && offset_y == 0 {
+                                            final_y
+                                        } else {
+                                            WinInput::screen_to_client(target_hwnd, final_x + offset_x, final_y + offset_y)
+                                                .map(|(_, y)| y)
+                                                .unwrap_or(final_y)
+                                        };
 
-                                    match config.popup_click_type {
-                                        ClickType::Single => {
-                                            WinInput::mouse_click(config.popup_click_button);
-                                        }
-                                        ClickType::Double => {
-                                            WinInput::mouse_click(config.popup_click_button);
-                                            PrecisionTimer::sleep_ms(35.0);
-                                            WinInput::mouse_click(config.popup_click_button);
-                                        }
-                                        ClickType::Triple => {
-                                            for _ in 0..3 {
+                                        WinInput::post_mouse_click_to_window(
+                                            target_hwnd,
+                                            client_x,
+                                            client_y,
+                                            config.popup_click_button,
+                                            config.popup_click_type,
+                                            config.popup_hold_ms,
+                                        );
+                                    } else {
+                                        WinInput::set_cursor_pos(final_x + offset_x, final_y + offset_y);
+
+                                        match config.popup_click_type {
+                                            ClickType::Single => {
                                                 WinInput::mouse_click(config.popup_click_button);
-                                                PrecisionTimer::sleep_ms(30.0);
+                                            }
+                                            ClickType::Double => {
+                                                WinInput::mouse_click(config.popup_click_button);
+                                                PrecisionTimer::sleep_ms(35.0);
+                                                WinInput::mouse_click(config.popup_click_button);
+                                            }
+                                            ClickType::Triple => {
+                                                for _ in 0..3 {
+                                                    WinInput::mouse_click(config.popup_click_button);
+                                                    PrecisionTimer::sleep_ms(30.0);
+                                                }
+                                            }
+                                            ClickType::Hold => {
+                                                WinInput::mouse_down(config.popup_click_button);
+                                                PrecisionTimer::sleep_ms(config.popup_hold_ms.max(10.0));
+                                                WinInput::mouse_up(config.popup_click_button);
                                             }
                                         }
-                                        ClickType::Hold => {
-                                            WinInput::mouse_down(config.popup_click_button);
-                                            PrecisionTimer::sleep_ms(config.popup_hold_ms.max(10.0));
-                                            WinInput::mouse_up(config.popup_click_button);
+
+                                        if config.return_cursor {
+                                            WinInput::set_cursor_pos(orig_pos.0, orig_pos.1);
                                         }
                                     }
 
                                     total.fetch_add(1, Ordering::Relaxed);
-
-                                    if config.return_cursor {
-                                        WinInput::set_cursor_pos(orig_pos.0, orig_pos.1);
-                                    }
-
                                     clicked = true;
                                     PrecisionTimer::sleep_ms(config.cooldown_ms.max(20.0));
                                     popup_detector.reset();
                                 }
                             }
                             VisionMode::TemplateMatch => {
-                                let region_opt = if config.use_custom_region {
+                                let region_opt = if is_bg {
+                                    None
+                                } else if config.use_custom_region {
                                     Some((
                                         config.region_x1,
                                         config.region_y1,
@@ -660,36 +857,61 @@ impl EngineState {
                                         let target_x = m.center_x + jx;
                                         let target_y = m.center_y + jy;
 
-                                        WinInput::set_cursor_pos(target_x, target_y);
+                                        if is_bg {
+                                            let client_x = if offset_x == 0 && offset_y == 0 {
+                                                target_x
+                                            } else {
+                                                WinInput::screen_to_client(target_hwnd, target_x + offset_x, target_y + offset_y)
+                                                    .map(|(x, _)| x)
+                                                    .unwrap_or(target_x)
+                                            };
+                                            let client_y = if offset_x == 0 && offset_y == 0 {
+                                                target_y
+                                            } else {
+                                                WinInput::screen_to_client(target_hwnd, target_x + offset_x, target_y + offset_y)
+                                                    .map(|(_, y)| y)
+                                                    .unwrap_or(target_y)
+                                            };
 
-                                        match template.click_type {
-                                            ClickType::Single => {
-                                                WinInput::mouse_click(template.click_button);
-                                            }
-                                            ClickType::Double => {
-                                                WinInput::mouse_click(template.click_button);
-                                                PrecisionTimer::sleep_ms(35.0);
-                                                WinInput::mouse_click(template.click_button);
-                                            }
-                                            ClickType::Triple => {
-                                                for _ in 0..3 {
+                                            WinInput::post_mouse_click_to_window(
+                                                target_hwnd,
+                                                client_x,
+                                                client_y,
+                                                template.click_button,
+                                                template.click_type,
+                                                template.hold_ms,
+                                            );
+                                        } else {
+                                            WinInput::set_cursor_pos(target_x + offset_x, target_y + offset_y);
+
+                                            match template.click_type {
+                                                ClickType::Single => {
                                                     WinInput::mouse_click(template.click_button);
-                                                    PrecisionTimer::sleep_ms(30.0);
+                                                }
+                                                ClickType::Double => {
+                                                    WinInput::mouse_click(template.click_button);
+                                                    PrecisionTimer::sleep_ms(35.0);
+                                                    WinInput::mouse_click(template.click_button);
+                                                }
+                                                ClickType::Triple => {
+                                                    for _ in 0..3 {
+                                                        WinInput::mouse_click(template.click_button);
+                                                        PrecisionTimer::sleep_ms(30.0);
+                                                    }
+                                                }
+                                                ClickType::Hold => {
+                                                    WinInput::mouse_down(template.click_button);
+                                                    PrecisionTimer::sleep_ms(template.hold_ms.max(10.0));
+                                                    WinInput::mouse_up(template.click_button);
                                                 }
                                             }
-                                            ClickType::Hold => {
-                                                WinInput::mouse_down(template.click_button);
-                                                PrecisionTimer::sleep_ms(template.hold_ms.max(10.0));
-                                                WinInput::mouse_up(template.click_button);
+
+                                            if config.return_cursor {
+                                                WinInput::set_cursor_pos(orig_pos.0, orig_pos.1);
                                             }
                                         }
 
                                         total.fetch_add(1, Ordering::Relaxed);
-
-                                        if config.return_cursor {
-                                            WinInput::set_cursor_pos(orig_pos.0, orig_pos.1);
-                                        }
-
                                         clicked = true;
                                         PrecisionTimer::sleep_ms(config.cooldown_ms.max(20.0));
                                         break;
