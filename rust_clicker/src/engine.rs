@@ -6,7 +6,7 @@ use rand::Rng;
 
 use crate::precision_timer::PrecisionTimer;
 use crate::screen_capture::ScreenCapture;
-use crate::vision::{VisionConfig, VisionEngine};
+use crate::vision::{PopupDetector, VisionConfig, VisionEngine, VisionMode};
 use crate::win_input::{ClickType, MouseButton, WinInput};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -532,7 +532,7 @@ impl EngineState {
     pub fn toggle_vision(&self, config: VisionConfig, adv: AdvancedConfig) {
         if self.is_running() {
             self.stop();
-        } else if !config.templates.is_empty() {
+        } else if config.mode == VisionMode::AutoPopup || !config.templates.is_empty() {
             self.running.store(true, Ordering::Relaxed);
             let running = self.running.clone();
             let total = self.total_clicks.clone();
@@ -540,6 +540,7 @@ impl EngineState {
             thread::spawn(move || {
                 let session_start = std::time::Instant::now();
                 let mut rng = rand::thread_rng();
+                let mut popup_detector = PopupDetector::new();
 
                 while running.load(Ordering::Relaxed) {
                     if adv.session_limit_enabled
@@ -565,73 +566,135 @@ impl EngineState {
                     }
 
                     if let Some(screen) = ScreenCapture::capture_screen() {
-                        let region_opt = if config.use_custom_region {
-                            Some((
-                                config.region_x1,
-                                config.region_y1,
-                                config.region_x2,
-                                config.region_y2,
-                            ))
-                        } else {
-                            None
-                        };
-
                         let mut clicked = false;
-                        for template in &config.templates {
-                            if !template.enabled {
-                                continue;
-                            }
 
-                            if let Some(m) = VisionEngine::find_template(&screen, template, region_opt) {
-                                let orig_pos = WinInput::get_cursor_pos();
+                        match config.mode {
+                            VisionMode::AutoPopup => {
+                                if let Some((target_x, target_y)) =
+                                    popup_detector.detect_popup(&screen, &config)
+                                {
+                                    let orig_pos = WinInput::get_cursor_pos();
 
-                                let jx = if config.click_jitter_px > 0 {
-                                    rng.gen_range(-config.click_jitter_px..=config.click_jitter_px)
-                                } else {
-                                    0
-                                };
-                                let jy = if config.click_jitter_px > 0 {
-                                    rng.gen_range(-config.click_jitter_px..=config.click_jitter_px)
-                                } else {
-                                    0
-                                };
+                                    let jx = if config.click_jitter_px > 0 {
+                                        rng.gen_range(-config.click_jitter_px..=config.click_jitter_px)
+                                    } else {
+                                        0
+                                    };
+                                    let jy = if config.click_jitter_px > 0 {
+                                        rng.gen_range(-config.click_jitter_px..=config.click_jitter_px)
+                                    } else {
+                                        0
+                                    };
 
-                                let target_x = m.center_x + jx;
-                                let target_y = m.center_y + jy;
+                                    let final_x = target_x + jx;
+                                    let final_y = target_y + jy;
 
-                                WinInput::set_cursor_pos(target_x, target_y);
+                                    WinInput::set_cursor_pos(final_x, final_y);
 
-                                match template.click_type {
-                                    ClickType::Single => {
-                                        WinInput::mouse_click(template.click_button);
-                                    }
-                                    ClickType::Double => {
-                                        WinInput::mouse_click(template.click_button);
-                                        PrecisionTimer::sleep_ms(35.0);
-                                        WinInput::mouse_click(template.click_button);
-                                    }
-                                    ClickType::Triple => {
-                                        for _ in 0..3 {
-                                             WinInput::mouse_click(template.click_button);
-                                             PrecisionTimer::sleep_ms(30.0);
+                                    match config.popup_click_type {
+                                        ClickType::Single => {
+                                            WinInput::mouse_click(config.popup_click_button);
+                                        }
+                                        ClickType::Double => {
+                                            WinInput::mouse_click(config.popup_click_button);
+                                            PrecisionTimer::sleep_ms(35.0);
+                                            WinInput::mouse_click(config.popup_click_button);
+                                        }
+                                        ClickType::Triple => {
+                                            for _ in 0..3 {
+                                                WinInput::mouse_click(config.popup_click_button);
+                                                PrecisionTimer::sleep_ms(30.0);
+                                            }
+                                        }
+                                        ClickType::Hold => {
+                                            WinInput::mouse_down(config.popup_click_button);
+                                            PrecisionTimer::sleep_ms(config.popup_hold_ms.max(10.0));
+                                            WinInput::mouse_up(config.popup_click_button);
                                         }
                                     }
-                                    ClickType::Hold => {
-                                        WinInput::mouse_down(template.click_button);
-                                        PrecisionTimer::sleep_ms(template.hold_ms.max(10.0));
-                                        WinInput::mouse_up(template.click_button);
+
+                                    total.fetch_add(1, Ordering::Relaxed);
+
+                                    if config.return_cursor {
+                                        WinInput::set_cursor_pos(orig_pos.0, orig_pos.1);
+                                    }
+
+                                    clicked = true;
+                                    PrecisionTimer::sleep_ms(config.cooldown_ms.max(20.0));
+                                    popup_detector.reset();
+                                }
+                            }
+                            VisionMode::TemplateMatch => {
+                                let region_opt = if config.use_custom_region {
+                                    Some((
+                                        config.region_x1,
+                                        config.region_y1,
+                                        config.region_x2,
+                                        config.region_y2,
+                                    ))
+                                } else {
+                                    None
+                                };
+
+                                for template in &config.templates {
+                                    if !template.enabled {
+                                        continue;
+                                    }
+
+                                    if let Some(m) =
+                                        VisionEngine::find_template(&screen, template, region_opt)
+                                    {
+                                        let orig_pos = WinInput::get_cursor_pos();
+
+                                        let jx = if config.click_jitter_px > 0 {
+                                            rng.gen_range(-config.click_jitter_px..=config.click_jitter_px)
+                                        } else {
+                                            0
+                                        };
+                                        let jy = if config.click_jitter_px > 0 {
+                                            rng.gen_range(-config.click_jitter_px..=config.click_jitter_px)
+                                        } else {
+                                            0
+                                        };
+
+                                        let target_x = m.center_x + jx;
+                                        let target_y = m.center_y + jy;
+
+                                        WinInput::set_cursor_pos(target_x, target_y);
+
+                                        match template.click_type {
+                                            ClickType::Single => {
+                                                WinInput::mouse_click(template.click_button);
+                                            }
+                                            ClickType::Double => {
+                                                WinInput::mouse_click(template.click_button);
+                                                PrecisionTimer::sleep_ms(35.0);
+                                                WinInput::mouse_click(template.click_button);
+                                            }
+                                            ClickType::Triple => {
+                                                for _ in 0..3 {
+                                                    WinInput::mouse_click(template.click_button);
+                                                    PrecisionTimer::sleep_ms(30.0);
+                                                }
+                                            }
+                                            ClickType::Hold => {
+                                                WinInput::mouse_down(template.click_button);
+                                                PrecisionTimer::sleep_ms(template.hold_ms.max(10.0));
+                                                WinInput::mouse_up(template.click_button);
+                                            }
+                                        }
+
+                                        total.fetch_add(1, Ordering::Relaxed);
+
+                                        if config.return_cursor {
+                                            WinInput::set_cursor_pos(orig_pos.0, orig_pos.1);
+                                        }
+
+                                        clicked = true;
+                                        PrecisionTimer::sleep_ms(config.cooldown_ms.max(20.0));
+                                        break;
                                     }
                                 }
-
-                                total.fetch_add(1, Ordering::Relaxed);
-
-                                if config.return_cursor {
-                                    WinInput::set_cursor_pos(orig_pos.0, orig_pos.1);
-                                }
-
-                                clicked = true;
-                                PrecisionTimer::sleep_ms(config.cooldown_ms.max(20.0));
-                                break;
                             }
                         }
 

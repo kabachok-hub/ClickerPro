@@ -7,7 +7,7 @@ use crate::engine::{
 };
 use crate::hotkeys::{HotkeyAction, HotkeyEvent, HotkeyManager};
 use crate::screen_capture::ScreenCapture;
-use crate::vision::{ButtonTemplate, VisionConfig};
+use crate::vision::{ButtonTemplate, PopupColorFilter, VisionConfig, VisionMode};
 use crate::win_input::{ClickType, MouseButton, WinInput};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1452,6 +1452,349 @@ impl ClickerApp {
     }
 
     fn render_vision_tab(&mut self, ui: &mut egui::Ui) {
+        // Mode Switcher Header
+        ui.horizontal(|ui| {
+            let is_auto = self.vision_cfg.mode == VisionMode::AutoPopup;
+
+            let auto_btn = egui::Button::new(
+                RichText::new("⚡ Авто-охотник (Pop-up Hunter)")
+                    .size(13.0)
+                    .strong()
+                    .color(if is_auto { Color32::WHITE } else { Color32::from_rgb(139, 148, 158) }),
+            )
+            .min_size(Vec2::new(230.0, 36.0))
+            .rounding(Rounding::same(6.0))
+            .fill(if is_auto { Color32::from_rgb(31, 111, 235) } else { Color32::from_rgb(22, 27, 34) })
+            .stroke(Stroke::new(1.0_f32, if is_auto { Color32::from_rgb(88, 166, 255) } else { Color32::from_rgb(48, 54, 61) }));
+
+            if ui.add(auto_btn).clicked() {
+                self.vision_cfg.mode = VisionMode::AutoPopup;
+            }
+
+            let is_tmpl = self.vision_cfg.mode == VisionMode::TemplateMatch;
+            let tmpl_btn = egui::Button::new(
+                RichText::new("🖼️ По образцу (Шаблоны кнопок)")
+                    .size(13.0)
+                    .strong()
+                    .color(if is_tmpl { Color32::WHITE } else { Color32::from_rgb(139, 148, 158) }),
+            )
+            .min_size(Vec2::new(230.0, 36.0))
+            .rounding(Rounding::same(6.0))
+            .fill(if is_tmpl { Color32::from_rgb(31, 111, 235) } else { Color32::from_rgb(22, 27, 34) })
+            .stroke(Stroke::new(1.0_f32, if is_tmpl { Color32::from_rgb(88, 166, 255) } else { Color32::from_rgb(48, 54, 61) }));
+
+            if ui.add(tmpl_btn).clicked() {
+                self.vision_cfg.mode = VisionMode::TemplateMatch;
+            }
+        });
+
+        ui.add_space(12.0);
+
+        if self.vision_cfg.mode == VisionMode::AutoPopup {
+            self.render_auto_popup_view(ui);
+        } else {
+            self.render_template_match_view(ui);
+        }
+    }
+
+    fn render_auto_popup_view(&mut self, ui: &mut egui::Ui) {
+        // Hero info card
+        egui::Frame::none()
+            .fill(Color32::from_rgb(15, 23, 42))
+            .rounding(Rounding::same(8.0))
+            .stroke(Stroke::new(1.0_f32, Color32::from_rgb(56, 139, 253)))
+            .inner_margin(egui::Margin::symmetric(16.0, 12.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("⚡ Авто-охотник за всплывающими кнопками")
+                            .size(14.0)
+                            .strong()
+                            .color(Color32::from_rgb(88, 166, 255)),
+                    );
+                });
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new("Кликер сам непрерывно сравнивает кадры экрана и МГНОВЕННО кликает по любому новому объекту или кнопке, которая выскочила в случайном месте экрана. Вам вообще не нужно вырезать картинки или создавать шаблоны!")
+                        .size(12.0)
+                        .color(Color32::from_rgb(201, 209, 217)),
+                );
+            });
+        ui.add_space(14.0);
+
+        // Status alert message
+        if let Some(ref msg) = self.vision_status_msg {
+            egui::Frame::none()
+                .fill(Color32::from_rgb(15, 35, 25))
+                .rounding(Rounding::same(6.0))
+                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(46, 160, 67)))
+                .inner_margin(egui::Margin::symmetric(12.0, 8.0))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(msg)
+                                .size(12.0)
+                                .color(Color32::from_rgb(63, 185, 80)),
+                        );
+                    });
+                });
+            ui.add_space(10.0);
+        }
+
+        // Box 1: Тип объекта и фильтрация
+        primer_box(
+            ui,
+            "🎯 Тип всплывающего объекта и цвет",
+            Some("выберите, на что именно должен реагировать авто-охотник"),
+            |ui| {
+                ui.label(RichText::new("Цветовой фильтр всплывашек:").size(12.5).strong().color(Color32::from_rgb(240, 246, 252)));
+                ui.add_space(6.0);
+
+                ui.horizontal_wrapped(|ui| {
+                    let filters = [
+                        (PopupColorFilter::AnyAppearance, "🎯 Любая всплывашка (Любой цвет)"),
+                        (PopupColorFilter::BrightOnly, "✨ Только яркие / светящиеся"),
+                        (PopupColorFilter::GoldYellow, "🟡 Золотые / жёлтые монетки"),
+                        (PopupColorFilter::Green, "🟢 Зелёные кнопки"),
+                        (PopupColorFilter::Red, "🔴 Красные кнопки"),
+                        (PopupColorFilter::CyanBlue, "🔵 Синие / голубые кнопки"),
+                    ];
+
+                    for (filter, label) in filters {
+                        let is_active = self.vision_cfg.popup_filter == filter;
+                        let btn = egui::Button::new(
+                            RichText::new(label)
+                                .size(12.0)
+                                .color(if is_active { Color32::WHITE } else { Color32::from_rgb(139, 148, 158) }),
+                        )
+                        .min_size(Vec2::new(0.0, 28.0))
+                        .rounding(Rounding::same(6.0))
+                        .fill(if is_active { Color32::from_rgb(31, 111, 235) } else { Color32::from_rgb(33, 38, 45) })
+                        .stroke(Stroke::new(1.0_f32, if is_active { Color32::from_rgb(88, 166, 255) } else { Color32::from_rgb(48, 54, 61) }));
+
+                        if ui.add(btn).clicked() {
+                            self.vision_cfg.popup_filter = filter;
+                        }
+                    }
+                });
+
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(10.0);
+
+                // Sensitivity slider
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Чувствительность к изменениям:").size(12.5).color(Color32::from_rgb(201, 209, 217)));
+                    let mut sens = self.vision_cfg.popup_sensitivity as i32;
+                    if ui.add(egui::Slider::new(&mut sens, 15..=90)).changed() {
+                        self.vision_cfg.popup_sensitivity = sens as u32;
+                    }
+                    ui.label(
+                        RichText::new("(меньше = острее реакция; 40–50 идеально для игр)")
+                            .size(11.0)
+                            .color(Color32::from_rgb(139, 148, 158)),
+                    );
+                });
+
+                ui.add_space(10.0);
+
+                // Size bounds (noise filter)
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Размер искомой кнопки:").size(12.5).color(Color32::from_rgb(201, 209, 217)));
+                    ui.label("от:");
+                    ui.add(egui::DragValue::new(&mut self.vision_cfg.popup_min_size).speed(1).range(10..=150).suffix(" px"));
+                    ui.label("до:");
+                    ui.add(egui::DragValue::new(&mut self.vision_cfg.popup_max_size).speed(2).range(50..=600).suffix(" px"));
+
+                    ui.add_space(8.0);
+                    if ui.button("Монеты (15-90px)").clicked() {
+                        self.vision_cfg.popup_min_size = 15;
+                        self.vision_cfg.popup_max_size = 90;
+                    }
+                    if ui.button("Кнопки (30-220px)").clicked() {
+                        self.vision_cfg.popup_min_size = 30;
+                        self.vision_cfg.popup_max_size = 220;
+                    }
+                    if ui.button("Плашки (60-450px)").clicked() {
+                        self.vision_cfg.popup_min_size = 60;
+                        self.vision_cfg.popup_max_size = 450;
+                    }
+                });
+
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(10.0);
+
+                // Click Action
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Действие при клике:").size(12.5).color(Color32::from_rgb(201, 209, 217)));
+
+                    let btn_label = match self.vision_cfg.popup_click_button {
+                        MouseButton::Left => "ЛКМ",
+                        MouseButton::Right => "ПКМ",
+                        MouseButton::Middle => "СКМ",
+                        _ => "ЛКМ",
+                    };
+                    if ui.button(btn_label).clicked() {
+                        self.vision_cfg.popup_click_button = match self.vision_cfg.popup_click_button {
+                            MouseButton::Left => MouseButton::Right,
+                            MouseButton::Right => MouseButton::Middle,
+                            MouseButton::Middle => MouseButton::Left,
+                            _ => MouseButton::Left,
+                        };
+                    }
+
+                    let type_label = match self.vision_cfg.popup_click_type {
+                        ClickType::Single => "Одиночный клик",
+                        ClickType::Double => "Двойной клик",
+                        ClickType::Triple => "Тройной клик",
+                        ClickType::Hold => "Зажатие",
+                    };
+                    if ui.button(type_label).clicked() {
+                        self.vision_cfg.popup_click_type = match self.vision_cfg.popup_click_type {
+                            ClickType::Single => ClickType::Double,
+                            ClickType::Double => ClickType::Hold,
+                            ClickType::Hold => ClickType::Single,
+                            _ => ClickType::Single,
+                        };
+                    }
+
+                    if self.vision_cfg.popup_click_type == ClickType::Hold {
+                        ui.label("Время зажатия:");
+                        ui.add(egui::DragValue::new(&mut self.vision_cfg.popup_hold_ms).speed(5.0).range(10.0..=2000.0).suffix(" мс"));
+                    }
+                });
+            },
+        );
+
+        // Box 2: Скорость и поведение мыши
+        primer_box(
+            ui,
+            "⚙️ Скорость сканирования и поведение мыши",
+            Some("настройка частоты проверок и возврата курсора"),
+            |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("⚡ Частота сканирования:").size(12.5).color(Color32::from_rgb(201, 209, 217)));
+                    ui.add(
+                        egui::Slider::new(&mut self.vision_cfg.scan_interval_ms, 15.0..=200.0)
+                            .step_by(5.0)
+                            .suffix(" мс"),
+                    );
+                    ui.label(
+                        RichText::new("(30 мс = ~33 кадра в секунду)")
+                            .size(11.0)
+                            .color(Color32::from_rgb(139, 148, 158)),
+                    );
+                });
+
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("⏱️ Cooldown (пауза после клика):").size(12.5).color(Color32::from_rgb(201, 209, 217)));
+                    ui.add(
+                        egui::Slider::new(&mut self.vision_cfg.cooldown_ms, 50.0..=1000.0)
+                            .step_by(10.0)
+                            .suffix(" мс"),
+                    );
+                    ui.label(
+                        RichText::new("(защита от повторных кликов по исчезающей кнопке)")
+                            .size(11.0)
+                            .color(Color32::from_rgb(139, 148, 158)),
+                    );
+                });
+
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.vision_cfg.return_cursor, "");
+                    ui.label(
+                        RichText::new("↩️ Возвращать курсор на исходное место после клика")
+                            .size(12.5)
+                            .strong()
+                            .color(Color32::from_rgb(240, 246, 252)),
+                    );
+                    ui.label(
+                        RichText::new("(не сбивает ваш прицел и обзор в игре!)")
+                            .size(11.0)
+                            .color(Color32::from_rgb(139, 148, 158)),
+                    );
+                });
+
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("🎲 Разброс клика (Jitter):").size(12.5).color(Color32::from_rgb(201, 209, 217)));
+                    ui.add(
+                        egui::Slider::new(&mut self.vision_cfg.click_jitter_px, 0..=10)
+                            .suffix(" px"),
+                    );
+                    ui.label(
+                        RichText::new("(микро-смещение от точного центра)")
+                            .size(11.0)
+                            .color(Color32::from_rgb(139, 148, 158)),
+                    );
+                });
+
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(8.0);
+
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.vision_cfg.use_custom_region, "");
+                    ui.label(
+                        RichText::new("🔲 Ограничить зону поиска (сканировать только часть экрана/окно игры)")
+                            .size(12.5)
+                            .color(Color32::from_rgb(201, 209, 217)),
+                    );
+                });
+
+                if self.vision_cfg.use_custom_region {
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(format!(
+                                "Текущая зона: ({}, {}) — ({}, {})",
+                                self.vision_cfg.region_x1,
+                                self.vision_cfg.region_y1,
+                                self.vision_cfg.region_x2,
+                                self.vision_cfg.region_y2
+                            ))
+                            .size(11.5)
+                            .color(Color32::from_rgb(88, 166, 255)),
+                        );
+
+                        ui.add_space(10.0);
+                        let is_reg_snip = self.vision_snip_mode == VisionSnipMode::RegionPoint;
+                        let reg_btn = egui::Button::new(if is_reg_snip {
+                            format!("⏳ Задать углы зоны [{}]...", self.pick_key_name)
+                        } else {
+                            format!("📐 Задать зону по 2 точкам [{}]", self.pick_key_name)
+                        })
+                        .fill(Color32::from_rgb(33, 38, 45))
+                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(48, 54, 61)))
+                        .rounding(Rounding::same(5.0));
+
+                        if ui.add(reg_btn).clicked() {
+                            if is_reg_snip {
+                                self.vision_snip_mode = VisionSnipMode::None;
+                                self.snip_p1 = None;
+                            } else {
+                                self.vision_snip_mode = VisionSnipMode::RegionPoint;
+                                self.snip_p1 = None;
+                                self.vision_status_msg = Some(format!(
+                                    "Наведите курсор на угол 1 зоны поиска и нажмите [{}]",
+                                    self.pick_key_name
+                                ));
+                            }
+                        }
+
+                        if ui.button("Сбросить на весь экран").clicked() {
+                            self.vision_cfg.use_custom_region = false;
+                        }
+                    });
+                }
+            },
+        );
+    }
+
+    fn render_template_match_view(&mut self, ui: &mut egui::Ui) {
         // Snipping Banner if in snip mode
         if self.vision_snip_mode != VisionSnipMode::None {
             egui::Frame::none()
