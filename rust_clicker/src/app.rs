@@ -6,7 +6,17 @@ use crate::engine::{
     ScrollConfig, ScrollDirection,
 };
 use crate::hotkeys::{HotkeyAction, HotkeyEvent, HotkeyManager};
+use crate::screen_capture::ScreenCapture;
+use crate::vision::{ButtonTemplate, VisionConfig};
 use crate::win_input::{ClickType, MouseButton, WinInput};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VisionSnipMode {
+    None,
+    CursorBox,
+    TwoPointRect,
+    RegionPoint,
+}
 
 pub struct ClickerApp {
     pub engine: EngineState,
@@ -42,6 +52,17 @@ pub struct ClickerApp {
     pub new_pt_delay: f64,
     pub new_pt_hold: f64,
     pub new_pt_btn: MouseButton,
+
+    // Vision tab state
+    pub vision_cfg: VisionConfig,
+    pub vision_snip_mode: VisionSnipMode,
+    pub snip_box_w: i32,
+    pub snip_box_h: i32,
+    pub snip_p1: Option<(i32, i32)>,
+    pub vision_status_msg: Option<String>,
+    pub file_import_path: String,
+    pub file_import_error: Option<String>,
+    pub template_textures: std::collections::HashMap<u64, egui::TextureHandle>,
 
     // Embedded icon texture
     pub icon_texture: Option<egui::TextureHandle>,
@@ -99,6 +120,16 @@ impl ClickerApp {
             new_pt_delay: 150.0,
             new_pt_hold: 0.0,
             new_pt_btn: MouseButton::Left,
+
+            vision_cfg: VisionConfig::default(),
+            vision_snip_mode: VisionSnipMode::None,
+            snip_box_w: 60,
+            snip_box_h: 60,
+            snip_p1: None,
+            vision_status_msg: None,
+            file_import_path: String::new(),
+            file_import_error: None,
+            template_textures: std::collections::HashMap::new(),
 
             icon_texture,
 
@@ -160,6 +191,12 @@ impl ClickerApp {
                 self.scroll_cfg.ticks = 2;
                 self.scroll_cfg.interval_ms = 60.0;
             }
+            "vision_fast" => {
+                self.active_tab = ActiveTab::Vision;
+                self.vision_cfg.scan_interval_ms = 35.0;
+                self.vision_cfg.cooldown_ms = 200.0;
+                self.vision_cfg.return_cursor = true;
+            }
             _ => {}
         }
     }
@@ -177,6 +214,9 @@ impl ClickerApp {
             }
             ActiveTab::Points => {
                 self.engine.toggle_route(self.points.clone(), self.advanced_cfg.clone());
+            }
+            ActiveTab::Vision => {
+                self.engine.toggle_vision(self.vision_cfg.clone(), self.advanced_cfg.clone());
             }
             ActiveTab::Settings => {
                 self.engine.toggle_mouse(self.mouse_cfg.clone(), self.advanced_cfg.clone());
@@ -248,6 +288,83 @@ impl ClickerApp {
                     break;
                 }
             }
+        }
+    }
+
+    fn handle_vision_snip_hotkey(&mut self, cx: i32, cy: i32) {
+        match self.vision_snip_mode {
+            VisionSnipMode::CursorBox => {
+                let half_w = self.snip_box_w / 2;
+                let half_h = self.snip_box_h / 2;
+                let x = (cx - half_w).max(0);
+                let y = (cy - half_h).max(0);
+
+                if let Some(cap) = ScreenCapture::capture_rect(x, y, self.snip_box_w, self.snip_box_h) {
+                    let id = rand::random::<u64>();
+                    let name = format!("Кнопка #{}", self.vision_cfg.templates.len() + 1);
+                    let tmpl = ButtonTemplate::from_capture(id, name, &cap, 0.82);
+                    self.vision_cfg.templates.push(tmpl);
+                    self.vision_snip_mode = VisionSnipMode::None;
+                    self.vision_status_msg = Some(format!(
+                        "✓ Захвачена кнопка {}×{} px!",
+                        self.snip_box_w, self.snip_box_h
+                    ));
+                }
+            }
+            VisionSnipMode::TwoPointRect => {
+                if let Some((p1_x, p1_y)) = self.snip_p1 {
+                    let x = p1_x.min(cx);
+                    let y = p1_y.min(cy);
+                    let w = (cx - p1_x).abs();
+                    let h = (cy - p1_y).abs();
+
+                    if w > 5 && h > 5 {
+                        if let Some(cap) = ScreenCapture::capture_rect(x, y, w, h) {
+                            let id = rand::random::<u64>();
+                            let name = format!("Кнопка #{}", self.vision_cfg.templates.len() + 1);
+                            let tmpl = ButtonTemplate::from_capture(id, name, &cap, 0.82);
+                            self.vision_cfg.templates.push(tmpl);
+                            self.vision_status_msg = Some(format!(
+                                "✓ Кнопка {}×{} px успешно добавлена!",
+                                w, h
+                            ));
+                        }
+                    }
+                    self.snip_p1 = None;
+                    self.vision_snip_mode = VisionSnipMode::None;
+                } else {
+                    self.snip_p1 = Some((cx, cy));
+                    self.vision_status_msg = Some(format!(
+                        "Точка 1: ({}, {}). Наведите на противоположный угол кнопки и нажмите [{}]",
+                        cx, cy, self.pick_key_name
+                    ));
+                }
+            }
+            VisionSnipMode::RegionPoint => {
+                if let Some((p1_x, p1_y)) = self.snip_p1 {
+                    self.vision_cfg.region_x1 = p1_x.min(cx);
+                    self.vision_cfg.region_y1 = p1_y.min(cy);
+                    self.vision_cfg.region_x2 = p1_x.max(cx);
+                    self.vision_cfg.region_y2 = p1_y.max(cy);
+                    self.vision_cfg.use_custom_region = true;
+                    self.snip_p1 = None;
+                    self.vision_snip_mode = VisionSnipMode::None;
+                    self.vision_status_msg = Some(format!(
+                        "✓ Область поиска: ({}, {}) - ({}, {})",
+                        self.vision_cfg.region_x1,
+                        self.vision_cfg.region_y1,
+                        self.vision_cfg.region_x2,
+                        self.vision_cfg.region_y2
+                    ));
+                } else {
+                    self.snip_p1 = Some((cx, cy));
+                    self.vision_status_msg = Some(format!(
+                        "Угол 1: ({}, {}). Наведите на противоположный угол зоны поиска и нажмите [{}]",
+                        cx, cy, self.pick_key_name
+                    ));
+                }
+            }
+            VisionSnipMode::None => {}
         }
     }
 }
@@ -427,6 +544,8 @@ impl eframe::App for ClickerApp {
                             delay_after_ms: self.new_pt_delay,
                             hold_ms: self.new_pt_hold,
                         });
+                    } else if self.active_tab == ActiveTab::Vision {
+                        self.handle_vision_snip_hotkey(cx, cy);
                     }
                 }
                 HotkeyEvent::EmergencyStop => {
@@ -531,6 +650,7 @@ impl eframe::App for ClickerApp {
                     (ActiveTab::Keyboard, "⌨️", "Клавиатура"),
                     (ActiveTab::Scroll, "📜", "Скролл"),
                     (ActiveTab::Points, "🎯", "Маршрут точек"),
+                    (ActiveTab::Vision, "👁️", "Поиск кнопок"),
                     (ActiveTab::Settings, "⚙️", "Расширенные"),
                 ];
 
@@ -774,6 +894,9 @@ impl eframe::App for ClickerApp {
                                             if primer_topic_badge(ui, "AFK-Скролл") {
                                                 self.apply_preset("afk_scroll");
                                             }
+                                            if primer_topic_badge(ui, "👁️ Поиск кнопок") {
+                                                self.apply_preset("vision_fast");
+                                            }
                                         });
                                     });
 
@@ -784,6 +907,7 @@ impl eframe::App for ClickerApp {
                                     ActiveTab::Keyboard => self.render_keyboard_tab(ui),
                                     ActiveTab::Scroll => self.render_scroll_tab(ui),
                                     ActiveTab::Points => self.render_points_tab(ui),
+                                    ActiveTab::Vision => self.render_vision_tab(ui),
                                     ActiveTab::Settings => self.render_settings_tab(ui),
                                 }
                             });
@@ -1322,6 +1446,486 @@ impl ClickerApp {
                     if let Some(i) = remove_idx {
                         self.points.remove(i);
                     }
+                }
+            },
+        );
+    }
+
+    fn render_vision_tab(&mut self, ui: &mut egui::Ui) {
+        // Snipping Banner if in snip mode
+        if self.vision_snip_mode != VisionSnipMode::None {
+            egui::Frame::none()
+                .fill(Color32::from_rgb(38, 26, 12))
+                .rounding(Rounding::same(6.0))
+                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(210, 153, 34)))
+                .inner_margin(egui::Margin::symmetric(14.0, 10.0))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        let text = match self.vision_snip_mode {
+                            VisionSnipMode::CursorBox => format!(
+                                "🎯 РЕЖИМ ЗАХВАТА: Наведите мышь на центр кнопки в игре и нажмите [{}]",
+                                self.pick_key_name
+                            ),
+                            VisionSnipMode::TwoPointRect => {
+                                if let Some((x1, y1)) = self.snip_p1 {
+                                    format!(
+                                        "📐 Точка 1 ({}, {}) зафиксирована! Наведите на второй угол кнопки и нажмите [{}]",
+                                        x1, y1, self.pick_key_name
+                                    )
+                                } else {
+                                    format!(
+                                        "📐 РЕЖИМ 2 ТОЧЕК: Наведите мышь на угол 1 кнопки и нажмите [{}]",
+                                        self.pick_key_name
+                                    )
+                                }
+                            }
+                            VisionSnipMode::RegionPoint => {
+                                if let Some((x1, y1)) = self.snip_p1 {
+                                    format!(
+                                        "🔲 Угол 1 зоны ({}, {}) зафиксирован! Наведите на второй угол зоны и нажмите [{}]",
+                                        x1, y1, self.pick_key_name
+                                    )
+                                } else {
+                                    format!(
+                                        "🔲 ОГРАНИЧЕНИЕ ЗОНЫ: Наведите курсор на угол 1 зоны поиска и нажмите [{}]",
+                                        self.pick_key_name
+                                    )
+                                }
+                            }
+                            VisionSnipMode::None => String::new(),
+                        };
+
+                        ui.label(
+                            RichText::new(text)
+                                .size(13.0)
+                                .strong()
+                                .color(Color32::from_rgb(227, 179, 65)),
+                        );
+
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .button(
+                                    RichText::new("Отмена")
+                                        .size(11.5)
+                                        .color(Color32::from_rgb(248, 81, 73)),
+                                )
+                                .clicked()
+                            {
+                                self.vision_snip_mode = VisionSnipMode::None;
+                                self.snip_p1 = None;
+                            }
+                        });
+                    });
+                });
+            ui.add_space(10.0);
+        }
+
+        // Status alert message
+        if let Some(ref msg) = self.vision_status_msg {
+            egui::Frame::none()
+                .fill(Color32::from_rgb(15, 35, 25))
+                .rounding(Rounding::same(6.0))
+                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(46, 160, 67)))
+                .inner_margin(egui::Margin::symmetric(12.0, 8.0))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(msg)
+                                .size(12.0)
+                                .color(Color32::from_rgb(63, 185, 80)),
+                        );
+                    });
+                });
+            ui.add_space(10.0);
+        }
+
+        // Box 1: Захват образца кнопки
+        primer_box(
+            ui,
+            "📸 Захват новой кнопки-цели с экрана",
+            Some("добавление изображения кнопки, на которую кликер должен реагировать"),
+            |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Размер рамки под курсором:").size(12.5).color(Color32::from_rgb(201, 209, 217)));
+                    ui.add_space(6.0);
+                    ui.label("Ширина:");
+                    ui.add(egui::DragValue::new(&mut self.snip_box_w).speed(1).range(20..=400).suffix(" px"));
+                    ui.label("Высота:");
+                    ui.add(egui::DragValue::new(&mut self.snip_box_h).speed(1).range(20..=400).suffix(" px"));
+
+                    ui.add_space(10.0);
+                    if ui.button("60×60").clicked() {
+                        self.snip_box_w = 60;
+                        self.snip_box_h = 60;
+                    }
+                    if ui.button("80×40").clicked() {
+                        self.snip_box_w = 80;
+                        self.snip_box_h = 40;
+                    }
+                    if ui.button("100×50").clicked() {
+                        self.snip_box_w = 100;
+                        self.snip_box_h = 50;
+                    }
+                });
+
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    let is_cursor_snip = self.vision_snip_mode == VisionSnipMode::CursorBox;
+                    let btn_text = if is_cursor_snip {
+                        format!("⏳ Наведите на кнопку в игре и нажмите [{}]", self.pick_key_name)
+                    } else {
+                        format!("🎯 Захват под курсором [{}]", self.pick_key_name)
+                    };
+
+                    let btn = egui::Button::new(
+                        RichText::new(btn_text)
+                            .size(12.5)
+                            .strong()
+                            .color(Color32::WHITE),
+                    )
+                    .min_size(Vec2::new(0.0, 32.0))
+                    .fill(if is_cursor_snip {
+                        Color32::from_rgb(187, 128, 9)
+                    } else {
+                        Color32::from_rgb(35, 134, 54)
+                    })
+                    .rounding(Rounding::same(6.0));
+
+                    if ui.add(btn).clicked() {
+                        if is_cursor_snip {
+                            self.vision_snip_mode = VisionSnipMode::None;
+                        } else {
+                            self.vision_snip_mode = VisionSnipMode::CursorBox;
+                            self.vision_status_msg = Some(format!(
+                                "Наведите курсор на кнопку в игре и нажмите [{}]",
+                                self.pick_key_name
+                            ));
+                        }
+                    }
+
+                    ui.add_space(8.0);
+                    let is_2pt = self.vision_snip_mode == VisionSnipMode::TwoPointRect;
+                    let btn_2pt = egui::Button::new(
+                        RichText::new(if is_2pt {
+                            "⏳ Выделение рамкой..."
+                        } else {
+                            "📐 Выделить рамкой (2 точки)"
+                        })
+                        .size(12.0)
+                        .color(Color32::from_rgb(201, 209, 217)),
+                    )
+                    .min_size(Vec2::new(0.0, 32.0))
+                    .fill(Color32::from_rgb(33, 38, 45))
+                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(48, 54, 61)))
+                    .rounding(Rounding::same(6.0));
+
+                    if ui.add(btn_2pt).clicked() {
+                        if is_2pt {
+                            self.vision_snip_mode = VisionSnipMode::None;
+                            self.snip_p1 = None;
+                        } else {
+                            self.vision_snip_mode = VisionSnipMode::TwoPointRect;
+                            self.snip_p1 = None;
+                            self.vision_status_msg = Some(format!(
+                                "Наведите на верхний левый угол кнопки и нажмите [{}]",
+                                self.pick_key_name
+                            ));
+                        }
+                    }
+                });
+
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Или путь к файлу картинки:").size(12.0).color(Color32::from_rgb(139, 148, 158)));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.file_import_path)
+                            .hint_text("C:\\path\\to\\button.png")
+                            .desired_width(260.0),
+                    );
+
+                    if ui.button("Загрузить").clicked() && !self.file_import_path.trim().is_empty() {
+                        let path = self.file_import_path.trim().to_string();
+                        let id = rand::random::<u64>();
+                        let name = format!("Кнопка #{}", self.vision_cfg.templates.len() + 1);
+                        match ButtonTemplate::from_file(id, name, &path, 0.82) {
+                            Ok(tmpl) => {
+                                self.vision_cfg.templates.push(tmpl);
+                                self.file_import_error = None;
+                                self.vision_status_msg = Some(format!("✓ Файл {} успешно загружен!", path));
+                            }
+                            Err(e) => {
+                                self.file_import_error = Some(e);
+                            }
+                        }
+                    }
+                });
+
+                if let Some(ref err) = self.file_import_error {
+                    ui.label(RichText::new(err).size(11.5).color(Color32::from_rgb(248, 81, 73)));
+                }
+            },
+        );
+
+        // Box 2: Список отслеживаемых кнопок
+        primer_box(
+            ui,
+            "🎯 Список целей (Кнопки для авто-клика)",
+            Some(format!("активных кнопок: {}", self.vision_cfg.templates.iter().filter(|t| t.enabled).count()).as_str()),
+            |ui| {
+                if self.vision_cfg.templates.is_empty() {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(10.0);
+                        ui.label(
+                            RichText::new("Цели пока не добавлены.")
+                                .size(13.0)
+                                .color(Color32::from_rgb(139, 148, 158)),
+                        );
+                        ui.label(
+                            RichText::new(format!(
+                                "Наведите курсор на нужную кнопку в игре и нажмите [{}] для захвата!",
+                                self.pick_key_name
+                            ))
+                            .size(12.0)
+                            .color(Color32::from_rgb(88, 166, 255)),
+                        );
+                        ui.add_space(10.0);
+                    });
+                } else {
+                    let mut remove_idx = None;
+                    let template_count = self.vision_cfg.templates.len();
+
+                    for (idx, tmpl) in self.vision_cfg.templates.iter_mut().enumerate() {
+                        let tex_id = tmpl.id;
+                        let texture = self.template_textures.entry(tex_id).or_insert_with(|| {
+                            let mut rgba = Vec::with_capacity(tmpl.bgra.len());
+                            for chunk in tmpl.bgra.chunks_exact(4) {
+                                rgba.push(chunk[2]); // R
+                                rgba.push(chunk[1]); // G
+                                rgba.push(chunk[0]); // B
+                                rgba.push(chunk[3]); // A
+                            }
+                            let img = egui::ColorImage::from_rgba_unmultiplied(
+                                [tmpl.width as usize, tmpl.height as usize],
+                                &rgba,
+                            );
+                            ui.ctx().load_texture(
+                                format!("tmpl_{}", tex_id),
+                                img,
+                                egui::TextureOptions::NEAREST,
+                            )
+                        });
+
+                        egui::Frame::none()
+                            .fill(Color32::from_rgb(26, 31, 39))
+                            .rounding(Rounding::same(6.0))
+                            .stroke(Stroke::new(1.0_f32, Color32::from_rgb(48, 54, 61)))
+                            .inner_margin(egui::Margin::symmetric(14.0, 10.0))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.checkbox(&mut tmpl.enabled, "");
+                                    ui.add(egui::TextEdit::singleline(&mut tmpl.name).desired_width(120.0));
+
+                                    // Thumbnail preview
+                                    let aspect = tmpl.width as f32 / tmpl.height.max(1) as f32;
+                                    let preview_h = 32.0;
+                                    let preview_w = (preview_h * aspect).clamp(24.0, 72.0);
+                                    ui.image((texture.id(), Vec2::new(preview_w, preview_h)));
+
+                                    ui.label(
+                                        RichText::new(format!("{}×{} px", tmpl.width, tmpl.height))
+                                            .size(11.0)
+                                            .color(Color32::from_rgb(139, 148, 158)),
+                                    );
+
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        let del_btn = egui::Button::new("🗑")
+                                            .fill(Color32::from_rgb(33, 38, 45))
+                                            .stroke(Stroke::new(1.0_f32, Color32::from_rgb(218, 54, 51)))
+                                            .rounding(Rounding::same(5.0));
+
+                                        if ui.add(del_btn).clicked() {
+                                            remove_idx = Some(idx);
+                                        }
+
+                                        // Threshold slider
+                                        ui.add_space(8.0);
+                                        let mut pct = (tmpl.threshold * 100.0) as i32;
+                                        ui.label(RichText::new("Точность:").size(11.5).color(Color32::from_rgb(201, 209, 217)));
+                                        if ui.add(egui::Slider::new(&mut pct, 60..=98).suffix("%")).changed() {
+                                            tmpl.threshold = pct as f32 / 100.0;
+                                        }
+
+                                        // Action button
+                                        ui.add_space(8.0);
+                                        let btn_label = match tmpl.click_button {
+                                            MouseButton::Left => "ЛКМ",
+                                            MouseButton::Right => "ПКМ",
+                                            MouseButton::Middle => "СКМ",
+                                            MouseButton::X1 => "X1",
+                                            MouseButton::X2 => "X2",
+                                        };
+                                        if ui.button(btn_label).clicked() {
+                                            tmpl.click_button = match tmpl.click_button {
+                                                MouseButton::Left => MouseButton::Right,
+                                                MouseButton::Right => MouseButton::Middle,
+                                                MouseButton::Middle => MouseButton::Left,
+                                                _ => MouseButton::Left,
+                                            };
+                                        }
+
+                                        let type_label = match tmpl.click_type {
+                                            ClickType::Single => "Клик",
+                                            ClickType::Double => "2x Клик",
+                                            ClickType::Triple => "3x Клик",
+                                            ClickType::Hold => "Зажатие",
+                                        };
+                                        if ui.button(type_label).clicked() {
+                                            tmpl.click_type = match tmpl.click_type {
+                                                ClickType::Single => ClickType::Double,
+                                                ClickType::Double => ClickType::Hold,
+                                                ClickType::Hold => ClickType::Single,
+                                                _ => ClickType::Single,
+                                            };
+                                        }
+                                    });
+                                });
+                            });
+
+                        if idx + 1 < template_count {
+                            ui.add_space(6.0);
+                        }
+                    }
+
+                    if let Some(i) = remove_idx {
+                        let tmpl = self.vision_cfg.templates.remove(i);
+                        self.template_textures.remove(&tmpl.id);
+                    }
+                }
+            },
+        );
+
+        // Box 3: Параметры сканирования и отклика
+        primer_box(
+            ui,
+            "⚙️ Скорость сканирования и поведение мыши",
+            Some("настройка частоты проверок и возврата курсора"),
+            |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("⚡ Интервал проверки:").size(12.5).color(Color32::from_rgb(201, 209, 217)));
+                    ui.add(
+                        egui::Slider::new(&mut self.vision_cfg.scan_interval_ms, 15.0..=300.0)
+                            .step_by(5.0)
+                            .suffix(" мс"),
+                    );
+                    ui.label(
+                        RichText::new("(40 мс = 25 сканов в сек)")
+                            .size(11.0)
+                            .color(Color32::from_rgb(139, 148, 158)),
+                    );
+                });
+
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("⏱️ Cooldown (пауза после клика):").size(12.5).color(Color32::from_rgb(201, 209, 217)));
+                    ui.add(
+                        egui::Slider::new(&mut self.vision_cfg.cooldown_ms, 50.0..=1000.0)
+                            .step_by(10.0)
+                            .suffix(" мс"),
+                    );
+                    ui.label(
+                        RichText::new("(защита от повторных кликов)")
+                            .size(11.0)
+                            .color(Color32::from_rgb(139, 148, 158)),
+                    );
+                });
+
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.vision_cfg.return_cursor, "");
+                    ui.label(
+                        RichText::new("↩️ Возвращать курсор на исходное место после клика")
+                            .size(12.5)
+                            .strong()
+                            .color(Color32::from_rgb(240, 246, 252)),
+                    );
+                    ui.label(
+                        RichText::new("(не сбивает ваш прицел и обзор в игре)")
+                            .size(11.0)
+                            .color(Color32::from_rgb(139, 148, 158)),
+                    );
+                });
+
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("🎲 Разброс клика (Jitter):").size(12.5).color(Color32::from_rgb(201, 209, 217)));
+                    ui.add(
+                        egui::Slider::new(&mut self.vision_cfg.click_jitter_px, 0..=10)
+                            .suffix(" px"),
+                    );
+                    ui.label(
+                        RichText::new("(рандомизация точки клика)")
+                            .size(11.0)
+                            .color(Color32::from_rgb(139, 148, 158)),
+                    );
+                });
+
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(8.0);
+
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.vision_cfg.use_custom_region, "");
+                    ui.label(
+                        RichText::new("🔲 Ограничить зону поиска (сканировать только часть экрана)")
+                            .size(12.5)
+                            .color(Color32::from_rgb(201, 209, 217)),
+                    );
+                });
+
+                if self.vision_cfg.use_custom_region {
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(format!(
+                                "Текущая зона: ({}, {}) — ({}, {})",
+                                self.vision_cfg.region_x1,
+                                self.vision_cfg.region_y1,
+                                self.vision_cfg.region_x2,
+                                self.vision_cfg.region_y2
+                            ))
+                            .size(11.5)
+                            .color(Color32::from_rgb(88, 166, 255)),
+                        );
+
+                        ui.add_space(10.0);
+                        let is_reg_snip = self.vision_snip_mode == VisionSnipMode::RegionPoint;
+                        let reg_btn = egui::Button::new(if is_reg_snip {
+                            format!("⏳ Задать углы зоны [{}]...", self.pick_key_name)
+                        } else {
+                            format!("📐 Задать зону по 2 точкам [{}]", self.pick_key_name)
+                        })
+                        .fill(Color32::from_rgb(33, 38, 45))
+                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(48, 54, 61)))
+                        .rounding(Rounding::same(5.0));
+
+                        if ui.add(reg_btn).clicked() {
+                            if is_reg_snip {
+                                self.vision_snip_mode = VisionSnipMode::None;
+                                self.snip_p1 = None;
+                            } else {
+                                self.vision_snip_mode = VisionSnipMode::RegionPoint;
+                                self.snip_p1 = None;
+                                self.vision_status_msg = Some(format!(
+                                    "Наведите курсор на угол 1 зоны поиска и нажмите [{}]",
+                                    self.pick_key_name
+                                ));
+                            }
+                        }
+
+                        if ui.button("Сбросить на весь экран").clicked() {
+                            self.vision_cfg.use_custom_region = false;
+                        }
+                    });
                 }
             },
         );

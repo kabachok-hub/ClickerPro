@@ -5,6 +5,8 @@ use std::thread;
 use rand::Rng;
 
 use crate::precision_timer::PrecisionTimer;
+use crate::screen_capture::ScreenCapture;
+use crate::vision::{VisionConfig, VisionEngine};
 use crate::win_input::{ClickType, MouseButton, WinInput};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -13,6 +15,7 @@ pub enum ActiveTab {
     Keyboard,
     Scroll,
     Points,
+    Vision,
     Settings,
 }
 
@@ -519,6 +522,125 @@ impl EngineState {
                     PrecisionTimer::sleep_ms(pt.delay_after_ms.max(10.0));
 
                     idx = (idx + 1) % points.len();
+                }
+
+                running.store(false, Ordering::Relaxed);
+            });
+        }
+    }
+
+    pub fn toggle_vision(&self, config: VisionConfig, adv: AdvancedConfig) {
+        if self.is_running() {
+            self.stop();
+        } else if !config.templates.is_empty() {
+            self.running.store(true, Ordering::Relaxed);
+            let running = self.running.clone();
+            let total = self.total_clicks.clone();
+
+            thread::spawn(move || {
+                let session_start = std::time::Instant::now();
+                let mut rng = rand::thread_rng();
+
+                while running.load(Ordering::Relaxed) {
+                    if adv.session_limit_enabled
+                        && session_start.elapsed().as_secs() >= adv.session_limit_seconds
+                    {
+                        break;
+                    }
+
+                    let (cur_x, cur_y) = WinInput::get_cursor_pos();
+                    if adv.corner_panic && cur_x <= 5 && cur_y <= 5 {
+                        break;
+                    }
+
+                    if adv.target_window_enabled && !adv.target_window_title.trim().is_empty() {
+                        let active_title = WinInput::get_active_window_title();
+                        if !active_title
+                            .to_lowercase()
+                            .contains(&adv.target_window_title.to_lowercase())
+                        {
+                            PrecisionTimer::sleep_ms(150.0);
+                            continue;
+                        }
+                    }
+
+                    if let Some(screen) = ScreenCapture::capture_screen() {
+                        let region_opt = if config.use_custom_region {
+                            Some((
+                                config.region_x1,
+                                config.region_y1,
+                                config.region_x2,
+                                config.region_y2,
+                            ))
+                        } else {
+                            None
+                        };
+
+                        let mut clicked = false;
+                        for template in &config.templates {
+                            if !template.enabled {
+                                continue;
+                            }
+
+                            if let Some(m) = VisionEngine::find_template(&screen, template, region_opt) {
+                                let orig_pos = WinInput::get_cursor_pos();
+
+                                let jx = if config.click_jitter_px > 0 {
+                                    rng.gen_range(-config.click_jitter_px..=config.click_jitter_px)
+                                } else {
+                                    0
+                                };
+                                let jy = if config.click_jitter_px > 0 {
+                                    rng.gen_range(-config.click_jitter_px..=config.click_jitter_px)
+                                } else {
+                                    0
+                                };
+
+                                let target_x = m.center_x + jx;
+                                let target_y = m.center_y + jy;
+
+                                WinInput::set_cursor_pos(target_x, target_y);
+
+                                match template.click_type {
+                                    ClickType::Single => {
+                                        WinInput::mouse_click(template.click_button);
+                                    }
+                                    ClickType::Double => {
+                                        WinInput::mouse_click(template.click_button);
+                                        PrecisionTimer::sleep_ms(35.0);
+                                        WinInput::mouse_click(template.click_button);
+                                    }
+                                    ClickType::Triple => {
+                                        for _ in 0..3 {
+                                             WinInput::mouse_click(template.click_button);
+                                             PrecisionTimer::sleep_ms(30.0);
+                                        }
+                                    }
+                                    ClickType::Hold => {
+                                        WinInput::mouse_down(template.click_button);
+                                        PrecisionTimer::sleep_ms(template.hold_ms.max(10.0));
+                                        WinInput::mouse_up(template.click_button);
+                                    }
+                                }
+
+                                total.fetch_add(1, Ordering::Relaxed);
+
+                                if config.return_cursor {
+                                    WinInput::set_cursor_pos(orig_pos.0, orig_pos.1);
+                                }
+
+                                clicked = true;
+                                PrecisionTimer::sleep_ms(config.cooldown_ms.max(20.0));
+                                break;
+                            }
+                        }
+
+                        if !clicked {
+                            PrecisionTimer::sleep_ms(config.scan_interval_ms.max(10.0));
+                        }
+                    } else {
+                        PrecisionTimer::sleep_ms(50.0);
+                    }
                 }
 
                 running.store(false, Ordering::Relaxed);

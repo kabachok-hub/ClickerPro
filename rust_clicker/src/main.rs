@@ -4,6 +4,8 @@ mod app;
 mod engine;
 mod hotkeys;
 mod precision_timer;
+mod screen_capture;
+mod vision;
 mod win_input;
 
 use app::ClickerApp;
