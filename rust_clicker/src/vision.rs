@@ -587,3 +587,43 @@ impl PopupDetector {
         best_target
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_detect_roblox_button() {
+        let img_bytes = include_bytes!("../../assets/roblox_button.png");
+        let img = image::load_from_memory(img_bytes).expect("Failed to load roblox_button.png");
+        let rgba = img.to_rgba8();
+        let (w, h) = rgba.dimensions();
+        let mut bgra = Vec::with_capacity((w * h * 4) as usize);
+        for p in rgba.pixels() {
+            bgra.push(p[2]); // B
+            bgra.push(p[1]); // G
+            bgra.push(p[0]); // R
+            bgra.push(p[3]); // A
+        }
+
+        let cap = ScreenCapture {
+            width: w as i32,
+            height: h as i32,
+            buffer: bgra,
+        };
+
+        let mut detector = PopupDetector::new();
+        let config = VisionConfig {
+            popup_filter: PopupColorFilter::PurpleViolet,
+            popup_min_size: 20,
+            popup_max_size: 300,
+            ..Default::default()
+        };
+
+        let target = detector.detect_popup(&cap, &config);
+        println!("detect_popup result: {:?}", target);
+        assert!(target.is_some(), "Roblox button was NOT detected!");
+        let (tx, ty) = target.unwrap();
+        println!("Detected Roblox button center at: ({}, {})", tx, ty);
+    }
+}
