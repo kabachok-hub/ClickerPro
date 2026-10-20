@@ -14,7 +14,9 @@ build/
 dist/
 *.spec
 ClickerPro_Python.exe
-ClickerPro_Rust.exe
+# Test images and scratch
+*.png
+ClickerPro_AutoHunter.exe
 *Автокликер*
 
 # OS / Editor artifacts
