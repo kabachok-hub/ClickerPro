@@ -43,7 +43,8 @@ class ClickerAppGUI(ctk.CTk):
         self.engine.on_log = self.on_log_msg
 
         # Variables
-        self.mode_var = ctk.StringVar(value="🟣 Roblox x2 (Кружок с рукой)")
+        self.mode_var = ctk.StringVar(value="🌟 Все всплывающие кружки (Универсальный)")
+        self.exclude_hud_var = ctk.BooleanVar(value=True)
         self.sens_var = ctk.DoubleVar(value=70.0)
         self.interval_var = ctk.IntVar(value=35)
         self.hold_var = ctk.IntVar(value=45)
@@ -191,19 +192,24 @@ class ClickerAppGUI(ctk.CTk):
         self.mode_menu = ctk.CTkOptionMenu(
             left_col,
             values=[
+                "🌟 Все всплывающие кружки (Универсальный)",
                 "🟣 Roblox x2 (Кружок с рукой)",
                 "🟡 Золотые кружки / Монеты",
                 "🟠 Оранжевые кружки",
                 "🔴 Красные кружки",
                 "🟢 Зеленые кружки",
                 "🔵 Голубые кружки",
-                "🌈 Любой яркий кружок",
             ],
             variable=self.mode_var,
             command=self.on_mode_changed,
             height=32
         )
         self.mode_menu.pack(fill="x", padx=12, pady=(2, 10))
+
+        # Checkboxes
+        ctk.CTkCheckBox(left_col, text="🛡️ Игнорировать меню игры (Перерождение, Магазин)", variable=self.exclude_hud_var).pack(anchor="w", padx=12, pady=(4, 6))
+        ctk.CTkCheckBox(left_col, text="Возвращать курсор на место после клика", variable=self.return_cursor_var).pack(anchor="w", padx=12, pady=6)
+        ctk.CTkCheckBox(left_col, text="Звуковые сигналы (Бип при клике)", variable=self.sound_var).pack(anchor="w", padx=12, pady=6)
 
         # Sensitivity Slider
         self.sens_lbl = ctk.CTkLabel(left_col, text=f"Порог уверенности: {int(self.sens_var.get())}%")
@@ -244,10 +250,6 @@ class ClickerAppGUI(ctk.CTk):
         )
         self.hold_slider.pack(fill="x", padx=12, pady=(2, 10))
 
-        # Checkboxes
-        ctk.CTkCheckBox(left_col, text="Возвращать курсор на место после клика", variable=self.return_cursor_var).pack(anchor="w", padx=12, pady=6)
-        ctk.CTkCheckBox(left_col, text="Звуковые сигналы (Бип при клике и переключении)", variable=self.sound_var).pack(anchor="w", padx=12, pady=6)
-
         # --- Right Column: Diagnostics & Preview ---
         ctk.CTkLabel(right_col, text="📊 Диагностика и превью", font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", padx=12, pady=(10, 4))
 
@@ -279,7 +281,43 @@ class ClickerAppGUI(ctk.CTk):
             wraplength=340,
             justify="left"
         )
-        self.test_status_lbl.pack(anchor="w", padx=12, pady=(0, 8))
+        self.test_status_lbl.pack(anchor="w", padx=12, pady=(0, 6))
+
+        # Area / Region Picker
+        reg_box = ctk.CTkFrame(right_col, fg_color="#101216", corner_radius=6)
+        reg_box.pack(fill="x", padx=12, pady=(2, 8))
+
+        self.region_lbl = ctk.CTkLabel(
+            reg_box,
+            text="📍 Область: Игровая зона (без меню)",
+            font=ctk.CTkFont(size=11),
+            text_color="#58a6ff"
+        )
+        self.region_lbl.pack(anchor="w", padx=8, pady=(4, 2))
+
+        btn_row = ctk.CTkFrame(reg_box, fg_color="transparent")
+        btn_row.pack(fill="x", padx=6, pady=(0, 4))
+
+        ctk.CTkButton(
+            btn_row,
+            text="📐 Выбрать область мышкой",
+            font=ctk.CTkFont(size=11),
+            height=26,
+            fg_color="#30363d",
+            hover_color="#1f6feb",
+            command=self.select_custom_region
+        ).pack(side="left", fill="x", expand=True, padx=(0, 4))
+
+        ctk.CTkButton(
+            btn_row,
+            text="🔄 Сброс",
+            font=ctk.CTkFont(size=11),
+            height=26,
+            width=60,
+            fg_color="#21262d",
+            hover_color="#8b949e",
+            command=self.reset_custom_region
+        ).pack(side="right")
 
     # =========================================================================
     # TAB 2: NORMAL MOUSE CLICKER
@@ -377,15 +415,15 @@ class ClickerAppGUI(ctk.CTk):
         self.attributes("-topmost", self.topmost_var.get())
     def on_mode_changed(self, choice):
         mapping = {
+            "🌟 Все всплывающие кружки (Универсальный)": "all_circles",
             "🟣 Roblox x2 (Кружок с рукой)": "roblox_auto",
             "🟡 Золотые кружки / Монеты": "gold",
             "🟠 Оранжевые кружки": "orange",
             "🔴 Красные кружки": "red",
             "🟢 Зеленые кружки": "green",
             "🔵 Голубые кружки": "cyan",
-            "🌈 Любой яркий кружок": "all_circles",
         }
-        self.engine.hunter_mode = mapping.get(choice, "roblox_auto")
+        self.engine.hunter_mode = mapping.get(choice, "all_circles")
         self.engine.log(f"Режим охотника изменен на: {self.engine.hunter_mode}")
 
     def apply_config_to_engine(self):
@@ -394,6 +432,7 @@ class ClickerAppGUI(ctk.CTk):
         self.engine.hunter_hold_ms = self.hold_var.get()
         self.engine.hunter_return_cursor = self.return_cursor_var.get()
         self.engine.hunter_sound = self.sound_var.get()
+        self.engine.hunter_exclude_hud = self.exclude_hud_var.get()
         set_sound_enabled(self.sound_var.get())
 
         btn_map = {"Левая (Left)": "left", "Правая (Right)": "right", "Средняя (Middle)": "middle"}
@@ -464,9 +503,55 @@ class ClickerAppGUI(ctk.CTk):
         res, screen_bgr = self.engine.detector.detect_popup(
             mode=self.engine.hunter_mode,
             threshold=self.engine.hunter_threshold,
-            region=self.engine.hunter_region
+            region=self.engine.hunter_region,
+            exclude_hud=self.engine.hunter_exclude_hud,
         )
         self.after(0, lambda: self._display_test_result(res, screen_bgr))
+
+    def select_custom_region(self):
+        selector = ctk.CTkToplevel(self)
+        selector.attributes("-fullscreen", True)
+        selector.attributes("-alpha", 0.25)
+        selector.configure(fg_color="#000000")
+        selector.attributes("-topmost", True)
+
+        canvas = ctk.CTkCanvas(selector, cursor="crosshair", bg="black", highlightthickness=0)
+        canvas.pack(fill="both", expand=True)
+
+        rect = [None]
+        start_pt = [None]
+
+        def on_down(event):
+            start_pt[0] = (event.x_root, event.y_root)
+            if rect[0]:
+                canvas.delete(rect[0])
+            rect[0] = canvas.create_rectangle(event.x, event.y, event.x, event.y, outline="#00ff00", width=2)
+
+        def on_drag(event):
+            if start_pt[0] and rect[0]:
+                canvas.coords(rect[0], start_pt[0][0], start_pt[0][1], event.x_root, event.y_root)
+
+        def on_up(event):
+            if start_pt[0]:
+                x1, y1 = start_pt[0]
+                x2, y2 = event.x_root, event.y_root
+                rx1, rx2 = min(x1, x2), max(x1, x2)
+                ry1, ry2 = min(y1, y2), max(y1, y2)
+                if abs(rx2 - rx1) > 30 and abs(ry2 - ry1) > 30:
+                    self.engine.hunter_region = (rx1, ry1, rx2, ry2)
+                    self.region_lbl.configure(text=f"📍 Область: [{rx1}, {ry1}] → [{rx2}, {ry2}]")
+                    self.engine.log(f"Пользовательская область поиска: {self.engine.hunter_region}")
+            selector.destroy()
+
+        canvas.bind("<ButtonPress-1>", on_down)
+        canvas.bind("<B1-Motion>", on_drag)
+        canvas.bind("<ButtonRelease-1>", on_up)
+        selector.bind("<Escape>", lambda e: selector.destroy())
+
+    def reset_custom_region(self):
+        self.engine.hunter_region = None
+        self.region_lbl.configure(text="📍 Область: Игровая зона (без меню)")
+        self.engine.log("Область поиска сброшена на игровую зону.")
 
     def _display_test_result(self, res, screen_bgr):
         if res:

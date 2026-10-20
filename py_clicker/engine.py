@@ -29,7 +29,9 @@ class ClickerEngine:
         self.hunter_sound = False
         set_sound_enabled(False)
         self.hunter_region = None  # (x1, y1, x2, y2) or None
+        self.hunter_exclude_hud = True
         self.hunter_cooldown_ms = 180  # Cooldown after clicking to allow popup to vanish
+        self.clicked_targets = []  # [(x, y, timestamp)] to prevent double-clicking same spot
         
         # Normal mouse config
         self.mouse_button = "left"
@@ -113,15 +115,27 @@ class ClickerEngine:
         ensure_desktop_access()
         while self.is_hunter_active and not self.stop_event.is_set():
             t0 = time.perf_counter()
+            now = time.time()
+            self.clicked_targets = [item for item in self.clicked_targets if now - item[2] < 1.5]
+            
             try:
                 result, _ = self.detector.detect_popup(
                     mode=self.hunter_mode,
                     threshold=self.hunter_threshold,
                     region=self.hunter_region,
+                    exclude_hud=self.hunter_exclude_hud,
                 )
                 
                 if result is not None and self.is_hunter_active:
                     tx, ty = result["screen_center"]
+                    
+                    # Prevent clicking recently clicked spot
+                    is_recent = any(abs(tx - cx) < 45 and abs(ty - cy) < 45 for cx, cy, _ in self.clicked_targets)
+                    if is_recent:
+                        time.sleep(0.040)
+                        continue
+                        
+                    self.clicked_targets.append((tx, ty, now))
                     conf = result["confidence"]
                     method = result["method"]
                     

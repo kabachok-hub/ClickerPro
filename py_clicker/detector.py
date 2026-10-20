@@ -169,7 +169,7 @@ class PopupDetector:
             }
         return None
 
-    def detect_circle_by_color(self, screen_bgr, color_filter="purple", min_size=25, max_size=250):
+    def detect_circle_by_color(self, screen_bgr, color_filter="purple", min_size=35, max_size=180):
         """
         Universal Circular Contour & Badge Detector.
         Speed: 5-10ms.
@@ -212,7 +212,7 @@ class PopupDetector:
 
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         candidates = []
-        min_area = (min_size * min_size) * 0.4
+        min_area = (min_size * min_size) * 0.45
         max_area = (max_size * max_size) * 1.2
         
         for c in contours:
@@ -225,18 +225,18 @@ class PopupDetector:
             circularity = 4 * np.pi * area / (peri * peri)
             x, y, w, h = cv2.boundingRect(c)
             
-            # Exclude extreme top bar
-            if y < 25 and sh >= 400:
+            # Exclude extreme borders
+            if y < 15 or (y + h) > (sh - 15) or x < 10 or (x + w) > (sw - 10):
                 continue
                 
             aspect = w / float(h)
-            if 0.55 <= aspect <= 1.80 and circularity >= 0.40:
+            if 0.60 <= aspect <= 1.60 and circularity >= 0.45:
                 # Count white pixels inside bounding box (interior hand icon / x2 / text)
                 sub = screen_bgr[y:y+h, x:x+w]
                 white_px = int(np.sum((sub[:,:,0] > 185) & (sub[:,:,1] > 185) & (sub[:,:,2] > 185)))
                 
                 # Real interactive button popup always contains a white icon / text badge!
-                if white_px >= 15:
+                if white_px >= 18:
                     score = circularity * 100.0 + min(100.0, (white_px / (w * h)) * 300.0)
                     candidates.append({
                         "center": (x + w // 2, y + h // 2),
@@ -252,17 +252,31 @@ class PopupDetector:
             return candidates[0]
         return None
 
-    def detect_popup(self, mode="roblox_auto", threshold=0.70, region=None):
+    def detect_popup(self, mode="roblox_auto", threshold=0.70, region=None, exclude_hud=True):
         """
         Unified detector:
-        Captures screen and detects popup button.
+        Captures gameplay screen and detects popup button.
+        Automatically excludes static HUD menus (Rebirth, Shop, etc.) unless custom region is set.
         Returns result dict and screen_bgr.
         """
+        if region is None and exclude_hud:
+            mon = self.get_sct().monitors[1]
+            sw = mon["width"]
+            sh = mon["height"]
+            left = mon["left"]
+            top = mon["top"]
+            # Exclude left menu (Rebirth/Shop: x < 280), right menu (x > sw - 140), topbar (y < 70), bottom hotbar (y > sh - 110)
+            rx1 = left + max(280, int(sw * 0.15))
+            rx2 = left + min(sw - 140, int(sw * 0.92))
+            ry1 = top + max(70, int(sh * 0.07))
+            ry2 = top + min(sh - 110, int(sh * 0.89))
+            region = (rx1, ry1, rx2, ry2)
+
         screen_bgr, offset_x, offset_y = self.capture_screen(region)
         result = None
         
-        # 1. If mode is roblox_auto or template, check embedded template first
-        if mode in ("roblox_auto", "template") and "roblox_button" in self.templates:
+        # 1. Check embedded multiplier template first
+        if mode in ("roblox_auto", "template", "all_circles") and "roblox_button" in self.templates:
             result = self.match_template_coarse_fine(screen_bgr, self.templates["roblox_button"], min_conf=threshold)
             
         # 2. If no template match or color mode, use HSV circle detector
