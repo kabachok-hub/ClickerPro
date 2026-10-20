@@ -138,7 +138,15 @@ def hardware_click(x, y, button="left", click_type="single", hold_ms=45, return_
     if return_cursor and (orig_x != x or orig_y != y):
         set_cursor_pos(orig_x, orig_y)
 
+SOUND_ENABLED = False
+
+def set_sound_enabled(enabled):
+    global SOUND_ENABLED
+    SOUND_ENABLED = enabled
+
 def play_sound_start():
+    if not SOUND_ENABLED:
+        return
     try:
         winsound.Beep(900, 70)
         winsound.Beep(1200, 100)
@@ -146,12 +154,16 @@ def play_sound_start():
         pass
 
 def play_sound_stop():
+    if not SOUND_ENABLED:
+        return
     try:
         winsound.Beep(600, 120)
     except Exception:
         pass
 
 def play_sound_click():
+    if not SOUND_ENABLED:
+        return
     try:
         winsound.Beep(1500, 60)
     except Exception:

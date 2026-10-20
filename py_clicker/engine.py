@@ -8,6 +8,7 @@ from win_input import (
     play_sound_stop,
     play_sound_click,
     ensure_desktop_access,
+    set_sound_enabled,
 )
 from detector import PopupDetector
 
@@ -25,7 +26,8 @@ class ClickerEngine:
         self.hunter_interval_ms = 40
         self.hunter_hold_ms = 45
         self.hunter_return_cursor = True
-        self.hunter_sound = True
+        self.hunter_sound = False
+        set_sound_enabled(False)
         self.hunter_region = None  # (x1, y1, x2, y2) or None
         self.hunter_cooldown_ms = 180  # Cooldown after clicking to allow popup to vanish
         
@@ -220,5 +222,6 @@ class ClickerEngine:
     def panic_stop(self):
         self.stop_hunter()
         self.stop_mouse()
-        play_sound_stop()
+        if self.hunter_sound:
+            play_sound_stop()
         self.log(f"🚨 АВАРИЙНАЯ ОСТАНОВКА [{self.hotkey_panic}]")

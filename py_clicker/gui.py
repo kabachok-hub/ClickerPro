@@ -5,7 +5,7 @@ import threading
 from PIL import Image
 import customtkinter as ctk
 
-from win_input import is_admin, restart_as_admin
+from win_input import is_admin, restart_as_admin, set_sound_enabled
 from engine import ClickerEngine
 from detector import imwrite_unicode
 
@@ -48,7 +48,7 @@ class ClickerAppGUI(ctk.CTk):
         self.interval_var = ctk.IntVar(value=35)
         self.hold_var = ctk.IntVar(value=45)
         self.return_cursor_var = ctk.BooleanVar(value=True)
-        self.sound_var = ctk.BooleanVar(value=True)
+        self.sound_var = ctk.BooleanVar(value=False)
 
         self.mouse_btn_var = ctk.StringVar(value="Левая (Left)")
         self.mouse_type_var = ctk.StringVar(value="Одиночный")
@@ -394,6 +394,7 @@ class ClickerAppGUI(ctk.CTk):
         self.engine.hunter_hold_ms = self.hold_var.get()
         self.engine.hunter_return_cursor = self.return_cursor_var.get()
         self.engine.hunter_sound = self.sound_var.get()
+        set_sound_enabled(self.sound_var.get())
 
         btn_map = {"Левая (Left)": "left", "Правая (Right)": "right", "Средняя (Middle)": "middle"}
         self.engine.mouse_button = btn_map.get(self.mouse_btn_var.get(), "left")
