@@ -8,7 +8,7 @@ use winapi::um::winuser::{GetAsyncKeyState, VK_F12, VK_F6, VK_F8};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HotkeyEvent {
     ToggleStartStop,
-    PickCoordinate,
+    PickCoordinate(i32, i32),
     EmergencyStop,
 }
 
@@ -28,7 +28,7 @@ pub struct HotkeyManager {
 }
 
 impl HotkeyManager {
-    pub fn new() -> Self {
+    pub fn new(ctx: eframe::egui::Context) -> Self {
         let running = Arc::new(AtomicBool::new(true));
         let (tx, rx) = channel();
 
@@ -57,6 +57,7 @@ impl HotkeyManager {
                         let toggle_state = (GetAsyncKeyState(k_toggle as i32) as u16 & 0x8000) != 0;
                         if toggle_state && !toggle_was_down {
                             let _ = tx.send(HotkeyEvent::ToggleStartStop);
+                            ctx.request_repaint();
                         }
                         toggle_was_down = toggle_state;
                     }
@@ -65,7 +66,9 @@ impl HotkeyManager {
                     if k_pick > 0 {
                         let pick_state = (GetAsyncKeyState(k_pick as i32) as u16 & 0x8000) != 0;
                         if pick_state && !pick_was_down {
-                            let _ = tx.send(HotkeyEvent::PickCoordinate);
+                            let (x,y) = crate::win_input::WinInput::get_cursor_pos();
+                            let _ = tx.send(HotkeyEvent::PickCoordinate(x,y));
+                            ctx.request_repaint();
                         }
                         pick_was_down = pick_state;
                     }
@@ -75,6 +78,7 @@ impl HotkeyManager {
                         let panic_state = (GetAsyncKeyState(k_panic as i32) as u16 & 0x8000) != 0;
                         if panic_state && !panic_was_down {
                             let _ = tx.send(HotkeyEvent::EmergencyStop);
+                            ctx.request_repaint();
                         }
                         panic_was_down = panic_state;
                     }

@@ -1,7 +1,6 @@
 # Rust build artifacts
 target/
 **/target/
-Cargo.lock
 *.res
 *.o
 
@@ -14,7 +13,9 @@ build/
 dist/
 *.spec
 ClickerPro_Python.exe
-ClickerPro_Rust.exe
+# Test images and scratch
+*.png
+ClickerPro_AutoHunter.exe
 *Автокликер*
 
 # OS / Editor artifacts
@@ -26,3 +27,8 @@ ClickerPro_Rust.exe
 *.user
 Thumbs.db
 Desktop.ini
+
+# Regression screenshots
+!tests/fixtures/*.png
+
+!docs/assets/*.png
