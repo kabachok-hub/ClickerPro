@@ -1,7 +1,6 @@
 # Rust build artifacts
 target/
 **/target/
-Cargo.lock
 *.res
 *.o
 
@@ -31,3 +30,5 @@ Desktop.ini
 
 # Regression screenshots
 !tests/fixtures/*.png
+
+!docs/assets/*.png

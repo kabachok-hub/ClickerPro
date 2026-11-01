@@ -24,7 +24,7 @@ fn main() -> eframe::Result<()> {
     let mut viewport = eframe::egui::ViewportBuilder::default()
         .with_inner_size([1000.0, 650.0])
         .with_min_inner_size([880.0, 580.0])
-        .with_title("⚡ Автокликер Pro (Rust)");
+        .with_title(format!("Автокликер Pro {}", env!("CARGO_PKG_VERSION")));
 
     // Try to load embedded icon
     let icon_bytes = include_bytes!("../../assets/icon.png");
