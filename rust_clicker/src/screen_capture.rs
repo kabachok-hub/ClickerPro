@@ -1,5 +1,5 @@
 use winapi::shared::minwindef::{DWORD, LPVOID};
-use winapi::shared::windef::{HBITMAP, HDC, HGDIOBJ, HWND, RECT};
+use winapi::shared::windef::{HDC, HGDIOBJ, HWND, RECT};
 use winapi::um::wingdi::{
     BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, SelectObject,
     BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, RGBQUAD, SRCCOPY,
@@ -9,6 +9,7 @@ use winapi::um::winuser::{
     SM_CYSCREEN,
 };
 
+#[allow(dead_code)]
 pub const CAPTUREBLT: DWORD = 0x40000000;
 
 pub struct ScreenCapture {
@@ -17,19 +18,10 @@ pub struct ScreenCapture {
     pub buffer: Vec<u8>, // BGRA format
 }
 
-#[inline]
-pub unsafe fn ensure_input_desktop() {
-    let h_input = winapi::um::winuser::OpenInputDesktop(0, 0, 0x01FF);
-    if !h_input.is_null() {
-        winapi::um::winuser::SetThreadDesktop(h_input);
-    }
-}
-
 impl ScreenCapture {
     /// Captures the primary screen (or full desktop) into a BGRA byte buffer.
     pub fn capture_screen() -> Option<Self> {
         unsafe {
-            ensure_input_desktop();
 
             let width = GetSystemMetrics(SM_CXSCREEN);
             let height = GetSystemMetrics(SM_CYSCREEN);
@@ -119,7 +111,6 @@ impl ScreenCapture {
                 return None;
             }
 
-            ensure_input_desktop();
 
             let hdc_screen: HDC = GetDC(std::ptr::null_mut());
             if hdc_screen.is_null() {
@@ -206,7 +197,6 @@ impl ScreenCapture {
                 return None;
             }
 
-            ensure_input_desktop();
 
             let mut rect = RECT {
                 left: 0,
@@ -273,7 +263,7 @@ impl ScreenCapture {
             let old_obj = SelectObject(hdc_mem, hbm as HGDIOBJ);
 
             // PW_RENDERFULLCONTENT = 2
-            let pw_res = PrintWindow(hwnd, hdc_mem, 2);
+            let pw_res = PrintWindow(hwnd, hdc_mem, 3);
             let blt_res = if pw_res != 0 {
                 1
             } else {

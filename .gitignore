@@ -28,3 +28,6 @@ ClickerPro_AutoHunter.exe
 *.user
 Thumbs.db
 Desktop.ini
+
+# Regression screenshots
+!tests/fixtures/*.png

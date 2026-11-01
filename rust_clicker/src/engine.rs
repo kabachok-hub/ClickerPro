@@ -4,9 +4,8 @@ use std::thread;
 
 use rand::Rng;
 
-use crate::precision_timer::PrecisionTimer;
 use crate::screen_capture::ScreenCapture;
-use crate::vision::{PopupColorFilter, PopupDetector, VisionConfig, VisionEngine, VisionMode};
+use crate::vision::{PopupColorFilter, PopupDetector, VisionConfig, VisionMode};
 use crate::win_input::{ClickType, MouseButton, WinInput};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,6 +26,7 @@ pub struct MouseConfig {
     pub custom_interval_ms: f64,
     pub use_cps: bool,
     pub jitter_ms: f64,
+    pub continuous_hold: bool,
     pub hold_duration_ms: f64,
     pub fixed_pos: bool,
     pub target_x: i32,
@@ -44,7 +44,8 @@ impl Default for MouseConfig {
             custom_interval_ms: 20.0,
             use_cps: true,
             jitter_ms: 0.0,
-            hold_duration_ms: 200.0,
+            continuous_hold: true,
+            hold_duration_ms: 0.0,
             fixed_pos: false,
             target_x: 0,
             target_y: 0,
@@ -258,16 +259,33 @@ pub fn calculate_jitter(rng: &mut impl Rng, max_jitter: f64, gaussian: bool) -> 
     }
 }
 
+#[derive(Clone, Default)]
+pub struct HunterStatus {
+    pub message: String,
+    pub last_action: String,
+    pub input_error: Option<String>,
+    pub scans: u64,
+    pub scan_ms: f64,
+    pub frame_size: (i32, i32),
+    pub preview: Option<(Vec<u8>, usize, usize)>,
+}
+
 pub struct EngineState {
     pub running: Arc<AtomicBool>,
+    pub hunter_status: Arc<std::sync::Mutex<HunterStatus>>,
+    worker: std::sync::Mutex<Option<thread::JoinHandle<()>>>,
     pub total_clicks: Arc<AtomicU64>,
+    pub last_target: Arc<std::sync::Mutex<Option<(i32, i32)>>>,
 }
 
 impl EngineState {
     pub fn new() -> Self {
         Self {
             running: Arc::new(AtomicBool::new(false)),
+            hunter_status: Arc::new(std::sync::Mutex::new(HunterStatus::default())),
+            worker: std::sync::Mutex::new(None),
             total_clicks: Arc::new(AtomicU64::new(0)),
+            last_target: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -279,19 +297,86 @@ impl EngineState {
         self.running.store(false, Ordering::Relaxed);
     }
 
+    fn join_previous_worker(&self) {
+        if let Ok(mut slot) = self.worker.lock() {
+            if let Some(worker) = slot.take() { let _ = worker.join(); }
+        }
+    }
+
     pub fn toggle_mouse(&self, config: MouseConfig, adv: AdvancedConfig) {
         if self.is_running() {
             self.stop();
         } else {
+            self.join_previous_worker();
             self.running.store(true, Ordering::Relaxed);
             let running = self.running.clone();
             let total = self.total_clicks.clone();
 
-            thread::spawn(move || {
+            let worker = thread::spawn(move || {
                 let mut rng = rand::thread_rng();
                 let mut clicks_done: u64 = 0;
                 let session_start = std::time::Instant::now();
                 let mut last_pos = WinInput::get_cursor_pos();
+
+                // True Continuous Hold Mode: Press down once and keep holding until F6/Stop!
+                if config.click_type == ClickType::Hold && config.continuous_hold {
+                    if config.fixed_pos {
+                        WinInput::set_cursor_pos(config.target_x, config.target_y);
+                        interruptible_wait(&running, 15.0);
+                    }
+
+                    if adv.window_target.enabled && adv.window_target.hwnd != 0 {
+                        let hwnd = adv.window_target.hwnd;
+                        if WinInput::is_window_valid(hwnd) {
+                            let (px, py) = if adv.window_target.click_center {
+                                WinInput::get_window_client_rect(hwnd)
+                                    .map(|(_, _, w, h)| (w / 2, h / 2))
+                                    .unwrap_or((100, 100))
+                            } else if config.fixed_pos {
+                                (config.target_x, config.target_y)
+                            } else {
+                                (adv.window_target.custom_x, adv.window_target.custom_y)
+                            };
+                            let lparam = (((py as u32) & 0xFFFF) << 16) | ((px as u32) & 0xFFFF);
+                            let (msg_down, msg_up, wparam_down) = match config.button {
+                                MouseButton::Left => (winapi::um::winuser::WM_LBUTTONDOWN, winapi::um::winuser::WM_LBUTTONUP, winapi::um::winuser::MK_LBUTTON),
+                                MouseButton::Right => (winapi::um::winuser::WM_RBUTTONDOWN, winapi::um::winuser::WM_RBUTTONUP, winapi::um::winuser::MK_RBUTTON),
+                                MouseButton::Middle => (winapi::um::winuser::WM_MBUTTONDOWN, winapi::um::winuser::WM_MBUTTONUP, winapi::um::winuser::MK_MBUTTON),
+                                MouseButton::X1 => (0x020B, 0x020C, 0x0020),
+                                MouseButton::X2 => (0x020B, 0x020C, 0x0040),
+                            };
+                            unsafe {
+                                winapi::um::winuser::PostMessageW(hwnd as winapi::shared::windef::HWND, msg_down, wparam_down, lparam as winapi::shared::minwindef::LPARAM);
+                            }
+                            total.fetch_add(1, Ordering::Relaxed);
+                            while running.load(Ordering::Relaxed) {
+                                if adv.session_limit_enabled && session_start.elapsed().as_secs() >= adv.session_limit_seconds {
+                                    break;
+                                }
+                                interruptible_wait(&running, 20.0);
+                            }
+                            unsafe {
+                                winapi::um::winuser::PostMessageW(hwnd as winapi::shared::windef::HWND, msg_up, 0, lparam as winapi::shared::minwindef::LPARAM);
+                            }
+                        }
+                    } else {
+                        WinInput::mouse_down(config.button);
+                        total.fetch_add(1, Ordering::Relaxed);
+                        while running.load(Ordering::Relaxed) {
+                            let (cur_x, cur_y) = WinInput::get_cursor_pos();
+                            if adv.corner_panic && cur_x <= 5 && cur_y <= 5 {
+                                break;
+                            }
+                            if adv.session_limit_enabled && session_start.elapsed().as_secs() >= adv.session_limit_seconds {
+                                break;
+                            }
+                            interruptible_wait(&running, 20.0);
+                        }
+                        WinInput::mouse_up(config.button);
+                    }
+                    running.store(false, Ordering::Relaxed);
+                    return;
+                }
 
                 while running.load(Ordering::Relaxed) {
                     // 1. Session duration limit
@@ -325,7 +410,7 @@ impl EngineState {
                     if adv.window_target.enabled && adv.window_target.hwnd != 0 {
                         let hwnd = adv.window_target.hwnd;
                         if !WinInput::is_window_valid(hwnd) {
-                            PrecisionTimer::sleep_ms(150.0);
+                            interruptible_wait(&running, 150.0);
                             continue;
                         }
 
@@ -346,11 +431,11 @@ impl EngineState {
                             py += rng.gen_range(-config.jitter_px..=config.jitter_px);
                         }
 
-                        let hold_ms = if adv.human_hold_duration {
+                        let hold_ms = if config.click_type == ClickType::Hold {
+                            config.hold_duration_ms.max(15.0)
+                        } else if adv.human_hold_duration {
                             let j = calculate_jitter(&mut rng, 8.0, adv.gaussian_jitter);
                             (adv.natural_hold_ms + j).clamp(10.0, 95.0)
-                        } else if config.click_type == ClickType::Hold {
-                            config.hold_duration_ms
                         } else {
                             0.0
                         };
@@ -383,7 +468,7 @@ impl EngineState {
                             delay = (delay + j).max(1.0);
                         }
 
-                        PrecisionTimer::sleep_ms(delay);
+                        interruptible_wait(&running, delay);
                         continue;
                     }
 
@@ -394,7 +479,7 @@ impl EngineState {
                             .to_lowercase()
                             .contains(&adv.target_window_title.to_lowercase())
                         {
-                            PrecisionTimer::sleep_ms(100.0);
+                            interruptible_wait(&running, 100.0);
                             last_pos = WinInput::get_cursor_pos();
                             continue;
                         }
@@ -418,35 +503,41 @@ impl EngineState {
                     // 7. Click execution
                     match config.click_type {
                         ClickType::Single => {
-                            let hold_ms = if adv.human_hold_duration {
+                            let hold_ms = if config.use_cps {
+                                if config.cps >= 25.0 {
+                                    1.5
+                                } else {
+                                    (1000.0 / config.cps * 0.25).clamp(2.0, 15.0)
+                                }
+                            } else if adv.human_hold_duration {
                                 let j = calculate_jitter(&mut rng, 8.0, adv.gaussian_jitter);
                                 (adv.natural_hold_ms + j).clamp(10.0, 95.0)
                             } else {
-                                0.0
+                                1.0
                             };
 
                             WinInput::mouse_down(config.button);
                             if hold_ms > 0.0 {
-                                PrecisionTimer::sleep_ms(hold_ms);
+                                interruptible_wait(&running, hold_ms);
                             }
                             WinInput::mouse_up(config.button);
                         }
                         ClickType::Double => {
                             WinInput::mouse_click(config.button);
-                            PrecisionTimer::sleep_ms(25.0);
+                            interruptible_wait(&running, 25.0);
                             WinInput::mouse_click(config.button);
                         }
                         ClickType::Triple => {
                             WinInput::mouse_click(config.button);
-                            PrecisionTimer::sleep_ms(25.0);
+                            interruptible_wait(&running, 25.0);
                             WinInput::mouse_click(config.button);
-                            PrecisionTimer::sleep_ms(25.0);
+                            interruptible_wait(&running, 25.0);
                             WinInput::mouse_click(config.button);
                         }
                         ClickType::Hold => {
                             // Exact hold mode
                             WinInput::mouse_down(config.button);
-                            PrecisionTimer::sleep_ms(config.hold_duration_ms);
+                            interruptible_wait(&running, config.hold_duration_ms);
                             WinInput::mouse_up(config.button);
                         }
                     }
@@ -472,11 +563,12 @@ impl EngineState {
                         delay = (delay + j).max(0.5);
                     }
 
-                    PrecisionTimer::sleep_ms(delay);
+                    interruptible_wait(&running, delay);
                 }
 
                 running.store(false, Ordering::Relaxed);
             });
+            if let Ok(mut slot) = self.worker.lock() { *slot = Some(worker); }
         }
     }
 
@@ -484,14 +576,54 @@ impl EngineState {
         if self.is_running() {
             self.stop();
         } else {
+            self.join_previous_worker();
             self.running.store(true, Ordering::Relaxed);
             let running = self.running.clone();
             let total = self.total_clicks.clone();
 
-            thread::spawn(move || {
+            let worker = thread::spawn(move || {
                 let mut rng = rand::thread_rng();
                 let mut count = 0;
                 let session_start = std::time::Instant::now();
+
+                // True Continuous Key Hold Mode
+                if config.mode == KeyMode::Hold && config.hold_ms <= 0.0 {
+                    if adv.window_target.enabled && adv.window_target.hwnd != 0 {
+                        let hwnd = adv.window_target.hwnd;
+                        if WinInput::is_window_valid(hwnd) {
+                            unsafe {
+                                winapi::um::winuser::PostMessageW(hwnd as winapi::shared::windef::HWND, winapi::um::winuser::WM_KEYDOWN, config.vk_code as winapi::shared::minwindef::WPARAM, 1 as winapi::shared::minwindef::LPARAM);
+                            }
+                            total.fetch_add(1, Ordering::Relaxed);
+                            while running.load(Ordering::Relaxed) {
+                                if adv.session_limit_enabled && session_start.elapsed().as_secs() >= adv.session_limit_seconds {
+                                    break;
+                                }
+                                interruptible_wait(&running, 20.0);
+                            }
+                            unsafe {
+                                let up_lparam = 1 | (1 << 30) | (1 << 31);
+                                winapi::um::winuser::PostMessageW(hwnd as winapi::shared::windef::HWND, winapi::um::winuser::WM_KEYUP, config.vk_code as winapi::shared::minwindef::WPARAM, up_lparam as winapi::shared::minwindef::LPARAM);
+                            }
+                        }
+                    } else {
+                        WinInput::key_down(config.vk_code);
+                        total.fetch_add(1, Ordering::Relaxed);
+                        while running.load(Ordering::Relaxed) {
+                            let (cur_x, cur_y) = WinInput::get_cursor_pos();
+                            if adv.corner_panic && cur_x <= 5 && cur_y <= 5 {
+                                break;
+                            }
+                            if adv.session_limit_enabled && session_start.elapsed().as_secs() >= adv.session_limit_seconds {
+                                break;
+                            }
+                            interruptible_wait(&running, 20.0);
+                        }
+                        WinInput::key_up(config.vk_code);
+                    }
+                    running.store(false, Ordering::Relaxed);
+                    return;
+                }
 
                 while running.load(Ordering::Relaxed) {
                     // Session duration limit
@@ -516,7 +648,7 @@ impl EngineState {
                     if adv.window_target.enabled && adv.window_target.hwnd != 0 {
                         let hwnd = adv.window_target.hwnd;
                         if !WinInput::is_window_valid(hwnd) {
-                            PrecisionTimer::sleep_ms(150.0);
+                            interruptible_wait(&running, 150.0);
                             continue;
                         }
                         let hold_ms = if config.mode == KeyMode::Hold { config.hold_ms } else { 0.0 };
@@ -531,7 +663,7 @@ impl EngineState {
                             delay = (delay + j).max(1.0);
                         }
 
-                        PrecisionTimer::sleep_ms(delay);
+                        interruptible_wait(&running, delay);
                         continue;
                     }
 
@@ -542,7 +674,7 @@ impl EngineState {
                             .to_lowercase()
                             .contains(&adv.target_window_title.to_lowercase())
                         {
-                            PrecisionTimer::sleep_ms(100.0);
+                            interruptible_wait(&running, 100.0);
                             continue;
                         }
                     }
@@ -553,7 +685,7 @@ impl EngineState {
                         }
                         KeyMode::Hold => {
                             WinInput::key_down(config.vk_code);
-                            PrecisionTimer::sleep_ms(config.hold_ms);
+                            interruptible_wait(&running, config.hold_ms);
                             WinInput::key_up(config.vk_code);
                         }
                     }
@@ -567,11 +699,12 @@ impl EngineState {
                         delay = (delay + j).max(1.0);
                     }
 
-                    PrecisionTimer::sleep_ms(delay);
+                    interruptible_wait(&running, delay);
                 }
 
                 running.store(false, Ordering::Relaxed);
             });
+            if let Ok(mut slot) = self.worker.lock() { *slot = Some(worker); }
         }
     }
 
@@ -579,11 +712,12 @@ impl EngineState {
         if self.is_running() {
             self.stop();
         } else {
+            self.join_previous_worker();
             self.running.store(true, Ordering::Relaxed);
             let running = self.running.clone();
             let total = self.total_clicks.clone();
 
-            thread::spawn(move || {
+            let worker = thread::spawn(move || {
                 let wheel_delta = 120;
                 let session_start = std::time::Instant::now();
 
@@ -605,7 +739,7 @@ impl EngineState {
                             .to_lowercase()
                             .contains(&adv.target_window_title.to_lowercase())
                         {
-                            PrecisionTimer::sleep_ms(100.0);
+                            interruptible_wait(&running, 100.0);
                             continue;
                         }
                     }
@@ -626,11 +760,12 @@ impl EngineState {
                     }
 
                     total.fetch_add(1, Ordering::Relaxed);
-                    PrecisionTimer::sleep_ms(config.interval_ms);
+                    interruptible_wait(&running, config.interval_ms);
                 }
 
                 running.store(false, Ordering::Relaxed);
             });
+            if let Ok(mut slot) = self.worker.lock() { *slot = Some(worker); }
         }
     }
 
@@ -638,11 +773,12 @@ impl EngineState {
         if self.is_running() {
             self.stop();
         } else if !points.is_empty() {
+            self.join_previous_worker();
             self.running.store(true, Ordering::Relaxed);
             let running = self.running.clone();
             let total = self.total_clicks.clone();
 
-            thread::spawn(move || {
+            let worker = thread::spawn(move || {
                 let mut idx = 0;
                 let session_start = std::time::Instant::now();
 
@@ -662,7 +798,7 @@ impl EngineState {
                     if adv.window_target.enabled && adv.window_target.hwnd != 0 {
                         let hwnd = adv.window_target.hwnd;
                         if !WinInput::is_window_valid(hwnd) {
-                            PrecisionTimer::sleep_ms(150.0);
+                            interruptible_wait(&running, 150.0);
                             continue;
                         }
                         let pt = &points[idx];
@@ -675,7 +811,7 @@ impl EngineState {
                             pt.hold_ms,
                         );
                         total.fetch_add(1, Ordering::Relaxed);
-                        PrecisionTimer::sleep_ms(pt.delay_after_ms.max(10.0));
+                        interruptible_wait(&running, pt.delay_after_ms.max(10.0));
                         idx = (idx + 1) % points.len();
                         continue;
                     }
@@ -686,7 +822,7 @@ impl EngineState {
                             .to_lowercase()
                             .contains(&adv.target_window_title.to_lowercase())
                         {
-                            PrecisionTimer::sleep_ms(100.0);
+                            interruptible_wait(&running, 100.0);
                             continue;
                         }
                     }
@@ -696,35 +832,162 @@ impl EngineState {
 
                     if pt.hold_ms > 0.0 {
                         WinInput::mouse_down(pt.button);
-                        PrecisionTimer::sleep_ms(pt.hold_ms);
+                        interruptible_wait(&running, pt.hold_ms);
                         WinInput::mouse_up(pt.button);
                     } else {
                         WinInput::mouse_click(pt.button);
                     }
 
                     total.fetch_add(1, Ordering::Relaxed);
-                    PrecisionTimer::sleep_ms(pt.delay_after_ms.max(10.0));
+                    interruptible_wait(&running, pt.delay_after_ms.max(10.0));
 
                     idx = (idx + 1) % points.len();
                 }
 
                 running.store(false, Ordering::Relaxed);
             });
+            if let Ok(mut slot) = self.worker.lock() { *slot = Some(worker); }
         }
     }
 
     pub fn toggle_vision(&self, config: VisionConfig, adv: AdvancedConfig) {
+        if self.is_running() { self.stop(); return; }
+        self.join_previous_worker();
+        if adv.window_target.hwnd == 0 || !WinInput::is_window_valid(adv.window_target.hwnd) {
+            if let Ok(mut s) = self.hunter_status.lock() { s.message = "Сначала выберите окно игры".into(); }
+            return;
+        }
+        if config.mode == VisionMode::TemplateMatch && !config.templates.iter().any(|t| t.enabled) {
+            if let Ok(mut status) = self.hunter_status.lock() { status.message = "Сначала захватите или загрузите образец цели".into(); }
+            return;
+        }
+        self.running.store(true, Ordering::Relaxed);
+        self.total_clicks.store(0, Ordering::Relaxed);
+        let running = self.running.clone();
+        let total = self.total_clicks.clone();
+        let last_target = self.last_target.clone();
+        let status = self.hunter_status.clone();
+        if let Ok(mut s) = status.lock() { *s = HunterStatus { message: "Ожидание окна игры…".into(), ..Default::default() }; }
+        let worker = thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let mut log = crate::diagnostics::HunterLog::new();
+            log.event(&format!("START target={:#x} title={} mode={:?}", adv.window_target.hwnd, adv.window_target.title, config.mode));
+            let mut last_capture_error: Option<String> = None;
+            let mut stop_reason = "User stop";
+            let mut session = crate::hunter::HunterSession::new(config.clone());
+            let mut input_job: Option<(thread::JoinHandle<Result<(), String>>, String)> = None;
+            let mut last_preview = std::time::Instant::now() - std::time::Duration::from_secs(1);
+            while running.load(Ordering::Relaxed) {
+                if adv.session_limit_enabled && started.elapsed().as_secs() >= adv.session_limit_seconds { stop_reason = "Session time limit"; break; }
+                if input_job.as_ref().is_some_and(|(job,_)| job.is_finished()) {
+                    let (job, description) = input_job.take().unwrap();
+                    let result = job.join().unwrap_or_else(|_| Err("Ошибка потока ввода".into()));
+                    log.event(&format!("INPUT result={:?} {}", result, description));
+                    session.complete_input(result.is_ok(), started.elapsed());
+                    if let Ok(mut s) = status.lock() {
+                        s.input_error = result.as_ref().err().cloned();
+                        s.last_action = match result {
+                            Ok(()) => { total.fetch_add(1, Ordering::Relaxed); description }
+                            Err(error) => format!("Клик не выполнен: {}", error),
+                        };
+                    }
+                }
+                let (cx, cy) = WinInput::get_cursor_pos();
+                if adv.corner_panic && cx <= 5 && cy <= 5 { stop_reason = "Cursor corner failsafe"; break; }
+                let frame = match crate::hunter::capture(&config, &adv) {
+                    Ok(frame) => {
+                        if last_capture_error.take().is_some() { log.event("CAPTURE resumed"); }
+                        frame
+                    },
+                    Err(message) => {
+                        if last_capture_error.as_deref() != Some(message.as_str()) {
+                            log.event(&format!("CAPTURE paused: {} foreground={:#x}", message, WinInput::get_foreground_window()));
+                            last_capture_error = Some(message.clone());
+                        }
+                        if let Ok(mut s) = status.lock() { s.message = message; s.frame_size = (0, 0); }
+                        interruptible_wait(&running, 100.0);
+                        continue;
+                    }
+                };
+                let scan_start = std::time::Instant::now();
+                let observation = session.observe(&frame, started.elapsed(), Some(&running));
+                if let Ok(mut s) = status.lock() {
+                    s.scans += 1;
+                    s.scan_ms = scan_start.elapsed().as_secs_f64() * 1000.0;
+                    s.frame_size = (frame.image.width, frame.image.height);
+                    s.message = if session.input_pending() { "Нажимаю цель; продолжаю следить за следующей".into() }
+                        else { "Поиск работает: ожидаю следующую цель".into() };
+                    if last_preview.elapsed().as_millis() >= 500 {
+                        s.preview = Some(crate::hunter::preview(&frame, observation.target.as_ref()));
+                        last_preview = std::time::Instant::now();
+                    }
+                }
+                if observation.start_input {
+                    let target = observation.target.unwrap();
+                    if !running.load(Ordering::Relaxed) || WinInput::get_foreground_window() != frame.hwnd
+                        || !WinInput::get_window_at_point(target.x, target.y).is_some_and(|w| w.hwnd == frame.hwnd) {
+                        let point_window = WinInput::get_window_at_point(target.x, target.y).map(|w| w.hwnd).unwrap_or(0);
+                        log.event(&format!("INPUT skipped: focus/overlay guard target={:#x} foreground={:#x} point={:#x}",
+                            frame.hwnd, WinInput::get_foreground_window(), point_window));
+                        if let Ok(mut s) = status.lock() { s.input_error = Some("Клик отложен: цель перекрыта или игра неактивна".into()); }
+                        session.complete_input(false, started.elapsed());
+                        continue;
+                    }
+                    let original = WinInput::get_cursor_pos();
+                    if let Ok(mut last) = last_target.lock() { *last = Some((target.x, target.y)); }
+                    let description = format!("Клик: ({}, {}) · {}", target.x, target.y, target.method);
+                    log.event(&format!("INPUT begin {} scans={}", description, status.lock().map(|s| s.scans).unwrap_or(0)));
+                    let input_running = running.clone();
+                    let return_cursor = config.return_cursor;
+                    let background_input = config.background_input;
+                    let hwnd = frame.hwnd;
+                    // Input and its hold/release delays must not hide the next popup from capture.
+                    let job = thread::spawn(move || {
+                        if !input_running.load(Ordering::Relaxed) || WinInput::get_foreground_window() != hwnd
+                            || !WinInput::get_window_at_point(target.x, target.y).is_some_and(|w| w.hwnd == hwnd) {
+                            return Err("Цель перекрыта или игра неактивна".into());
+                        }
+                        if background_input {
+                            match WinInput::screen_to_client(hwnd, target.x, target.y) {
+                                Some((x,y)) => { WinInput::post_mouse_click_to_window(hwnd, x, y, target.button, target.click_type, target.hold_ms); Ok(()) }
+                                None => Err("Не удалось преобразовать координаты окна".into()),
+                            }
+                        } else {
+                            WinInput::send_hardware_click(target.x, target.y, target.button, target.hold_ms,
+                                return_cursor, original.0, original.1, hwnd, &input_running)
+                        }
+                    });
+                    input_job = Some((job, description));
+                }
+                // Always capture again at the scan interval, including during input/cooldown.
+                interruptible_wait(&running, config.scan_interval_ms.max(10.0));
+            }
+            running.store(false, Ordering::Relaxed);
+            if let Some((job,_)) = input_job { let _ = job.join(); }
+            log.event(&format!("STOP reason={} clicks={}", stop_reason, total.load(Ordering::Relaxed)));
+            if let Ok(mut s) = status.lock() {
+                s.message = if stop_reason == "Cursor corner failsafe" {
+                    "Остановлен: курсор оказался в верхнем левом углу. F6 — запустить снова".into()
+                } else { "Остановлен".into() };
+            }
+        });
+        if let Ok(mut slot) = self.worker.lock() { *slot = Some(worker); }
+    }
+
+    #[allow(dead_code)]
+    pub fn toggle_unified(&self, config: UnifiedConfig, adv: AdvancedConfig) {
         if self.is_running() {
             self.stop();
-        } else if config.mode == VisionMode::AutoPopup || !config.templates.is_empty() {
+        } else {
+            self.join_previous_worker();
             self.running.store(true, Ordering::Relaxed);
             let running = self.running.clone();
             let total = self.total_clicks.clone();
 
-            thread::spawn(move || {
+            let worker = thread::spawn(move || {
                 let session_start = std::time::Instant::now();
-                let mut rng = rand::thread_rng();
                 let mut popup_detector = PopupDetector::new();
+                let mut last_farm_time = std::time::Instant::now();
 
                 while running.load(Ordering::Relaxed) {
                     if adv.session_limit_enabled
@@ -741,307 +1004,14 @@ impl EngineState {
                         break;
                     }
 
-                    if !is_bg && adv.target_window_enabled && !adv.target_window_title.trim().is_empty() {
-                        let active_title = WinInput::get_active_window_title();
-                        if !active_title
-                            .to_lowercase()
-                            .contains(&adv.target_window_title.to_lowercase())
-                        {
-                            PrecisionTimer::sleep_ms(150.0);
-                            continue;
-                        }
-                    }
-
-                    let (screen_opt, offset_x, offset_y) = if is_bg {
-                        if !WinInput::is_window_valid(target_hwnd) {
-                            PrecisionTimer::sleep_ms(150.0);
-                            continue;
-                        }
-                        match ScreenCapture::capture_window(target_hwnd) {
-                            Some(cap) => (Some(cap), 0, 0),
-                            None => {
-                                if let Some((l, t, r, b)) = WinInput::get_window_screen_rect(target_hwnd) {
-                                    let w = (r - l).max(1);
-                                    let h = (b - t).max(1);
-                                    (ScreenCapture::capture_rect(l, t, w, h), l, t)
-                                } else {
-                                    (ScreenCapture::capture_screen(), 0, 0)
-                                }
-                            }
-                        }
-                    } else if config.use_custom_region {
-                        let rx = config.region_x1.min(config.region_x2);
-                        let ry = config.region_y1.min(config.region_y2);
-                        let rw = (config.region_x1 - config.region_x2).abs();
-                        let rh = (config.region_y1 - config.region_y2).abs();
-                        if rw > 10 && rh > 10 {
-                            (ScreenCapture::capture_rect(rx, ry, rw, rh), rx, ry)
-                        } else {
-                            (ScreenCapture::capture_screen(), 0, 0)
-                        }
-                    } else {
-                        (ScreenCapture::capture_screen(), 0, 0)
-                    };
-
-                    if let Some(screen) = screen_opt {
-                        let mut clicked = false;
-
-                        match config.mode {
-                            VisionMode::AutoPopup => {
-                                if let Some((target_x, target_y)) =
-                                    popup_detector.detect_popup(&screen, &config)
-                                {
-                                    let orig_pos = WinInput::get_cursor_pos();
-
-                                    let jx = if config.click_jitter_px > 0 {
-                                        rng.gen_range(-config.click_jitter_px..=config.click_jitter_px)
-                                    } else {
-                                        0
-                                    };
-                                    let jy = if config.click_jitter_px > 0 {
-                                        rng.gen_range(-config.click_jitter_px..=config.click_jitter_px)
-                                    } else {
-                                        0
-                                    };
-
-                                    let final_x = target_x + jx;
-                                    let final_y = target_y + jy;
-
-                                    if is_bg {
-                                        let client_x = if offset_x == 0 && offset_y == 0 {
-                                            final_x
-                                        } else {
-                                            WinInput::screen_to_client(target_hwnd, final_x + offset_x, final_y + offset_y)
-                                                .map(|(x, _)| x)
-                                                .unwrap_or(final_x)
-                                        };
-                                        let client_y = if offset_x == 0 && offset_y == 0 {
-                                            final_y
-                                        } else {
-                                            WinInput::screen_to_client(target_hwnd, final_x + offset_x, final_y + offset_y)
-                                                .map(|(_, y)| y)
-                                                .unwrap_or(final_y)
-                                        };
-
-                                        WinInput::post_mouse_click_to_window(
-                                            target_hwnd,
-                                            client_x,
-                                            client_y,
-                                            config.popup_click_button,
-                                            config.popup_click_type,
-                                            config.popup_hold_ms,
-                                        );
-                                    } else {
-                                        WinInput::set_cursor_pos(final_x + offset_x, final_y + offset_y);
-                                        PrecisionTimer::sleep_ms(6.0); // Allow OS and game window to receive hover/focus
-
-                                        let hold = config.popup_hold_ms.max(35.0);
-                                        match config.popup_click_type {
-                                            ClickType::Single => {
-                                                WinInput::mouse_down(config.popup_click_button);
-                                                PrecisionTimer::sleep_ms(hold);
-                                                WinInput::mouse_up(config.popup_click_button);
-                                            }
-                                            ClickType::Double => {
-                                                WinInput::mouse_down(config.popup_click_button);
-                                                PrecisionTimer::sleep_ms(hold.min(45.0));
-                                                WinInput::mouse_up(config.popup_click_button);
-                                                PrecisionTimer::sleep_ms(30.0);
-                                                WinInput::mouse_down(config.popup_click_button);
-                                                PrecisionTimer::sleep_ms(hold.min(45.0));
-                                                WinInput::mouse_up(config.popup_click_button);
-                                            }
-                                            ClickType::Triple => {
-                                                for _ in 0..3 {
-                                                    WinInput::mouse_down(config.popup_click_button);
-                                                    PrecisionTimer::sleep_ms(hold.min(40.0));
-                                                    WinInput::mouse_up(config.popup_click_button);
-                                                    PrecisionTimer::sleep_ms(25.0);
-                                                }
-                                            }
-                                            ClickType::Hold => {
-                                                WinInput::mouse_down(config.popup_click_button);
-                                                PrecisionTimer::sleep_ms(config.popup_hold_ms.max(25.0));
-                                                WinInput::mouse_up(config.popup_click_button);
-                                            }
-                                        }
-
-                                        if config.return_cursor {
-                                            PrecisionTimer::sleep_ms(5.0);
-                                            WinInput::set_cursor_pos(orig_pos.0, orig_pos.1);
-                                        }
-                                    }
-
-                                    total.fetch_add(1, Ordering::Relaxed);
-                                    clicked = true;
-                                    PrecisionTimer::sleep_ms(config.cooldown_ms.max(20.0));
-                                    popup_detector.reset();
-                                }
-                            }
-                            VisionMode::TemplateMatch => {
-                                let region_opt = if is_bg {
-                                    None
-                                } else if config.use_custom_region {
-                                    Some((
-                                        config.region_x1,
-                                        config.region_y1,
-                                        config.region_x2,
-                                        config.region_y2,
-                                    ))
-                                } else {
-                                    None
-                                };
-
-                                for template in &config.templates {
-                                    if !template.enabled {
-                                        continue;
-                                    }
-
-                                    if let Some(m) =
-                                        VisionEngine::find_template(&screen, template, region_opt)
-                                    {
-                                        let orig_pos = WinInput::get_cursor_pos();
-
-                                        let jx = if config.click_jitter_px > 0 {
-                                            rng.gen_range(-config.click_jitter_px..=config.click_jitter_px)
-                                        } else {
-                                            0
-                                        };
-                                        let jy = if config.click_jitter_px > 0 {
-                                            rng.gen_range(-config.click_jitter_px..=config.click_jitter_px)
-                                        } else {
-                                            0
-                                        };
-
-                                        let target_x = m.center_x + jx;
-                                        let target_y = m.center_y + jy;
-
-                                        if is_bg {
-                                            let client_x = if offset_x == 0 && offset_y == 0 {
-                                                target_x
-                                            } else {
-                                                WinInput::screen_to_client(target_hwnd, target_x + offset_x, target_y + offset_y)
-                                                    .map(|(x, _)| x)
-                                                    .unwrap_or(target_x)
-                                            };
-                                            let client_y = if offset_x == 0 && offset_y == 0 {
-                                                target_y
-                                            } else {
-                                                WinInput::screen_to_client(target_hwnd, target_x + offset_x, target_y + offset_y)
-                                                    .map(|(_, y)| y)
-                                                    .unwrap_or(target_y)
-                                            };
-
-                                            WinInput::post_mouse_click_to_window(
-                                                target_hwnd,
-                                                client_x,
-                                                client_y,
-                                                template.click_button,
-                                                template.click_type,
-                                                template.hold_ms,
-                                            );
-                                        } else {
-                                            WinInput::set_cursor_pos(target_x + offset_x, target_y + offset_y);
-                                            PrecisionTimer::sleep_ms(6.0); // Allow OS and game window to receive hover/focus
-
-                                            let hold = template.hold_ms.max(35.0);
-                                            match template.click_type {
-                                                ClickType::Single => {
-                                                    WinInput::mouse_down(template.click_button);
-                                                    PrecisionTimer::sleep_ms(hold);
-                                                    WinInput::mouse_up(template.click_button);
-                                                }
-                                                ClickType::Double => {
-                                                    WinInput::mouse_down(template.click_button);
-                                                    PrecisionTimer::sleep_ms(hold.min(45.0));
-                                                    WinInput::mouse_up(template.click_button);
-                                                    PrecisionTimer::sleep_ms(30.0);
-                                                    WinInput::mouse_down(template.click_button);
-                                                    PrecisionTimer::sleep_ms(hold.min(45.0));
-                                                    WinInput::mouse_up(template.click_button);
-                                                }
-                                                ClickType::Triple => {
-                                                    for _ in 0..3 {
-                                                        WinInput::mouse_down(template.click_button);
-                                                        PrecisionTimer::sleep_ms(hold.min(40.0));
-                                                        WinInput::mouse_up(template.click_button);
-                                                        PrecisionTimer::sleep_ms(25.0);
-                                                    }
-                                                }
-                                                ClickType::Hold => {
-                                                    WinInput::mouse_down(template.click_button);
-                                                    PrecisionTimer::sleep_ms(template.hold_ms.max(25.0));
-                                                    WinInput::mouse_up(template.click_button);
-                                                }
-                                            }
-
-                                            if config.return_cursor {
-                                                PrecisionTimer::sleep_ms(5.0);
-                                                WinInput::set_cursor_pos(orig_pos.0, orig_pos.1);
-                                            }
-                                        }
-
-                                        total.fetch_add(1, Ordering::Relaxed);
-                                        clicked = true;
-                                        PrecisionTimer::sleep_ms(config.cooldown_ms.max(20.0));
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-
-                        if !clicked {
-                            PrecisionTimer::sleep_ms(config.scan_interval_ms.max(10.0));
-                        }
-                    } else {
-                        PrecisionTimer::sleep_ms(50.0);
-                    }
-                }
-
-                running.store(false, Ordering::Relaxed);
-            });
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn toggle_unified(&self, config: UnifiedConfig, adv: AdvancedConfig) {
-        if self.is_running() {
-            self.stop();
-        } else {
-            self.running.store(true, Ordering::Relaxed);
-            let running = self.running.clone();
-            let total = self.total_clicks.clone();
-
-            thread::spawn(move || {
-                let session_start = std::time::Instant::now();
-                let mut popup_detector = PopupDetector::new();
-                let mut last_farm_time = std::time::Instant::now();
-
-                while running.load(Ordering::Relaxed) {
-                    if adv.session_limit_enabled
-                        && session_start.elapsed().as_secs() >= adv.session_limit_seconds
-                    {
-                        break;
-                    }
-
-                    let is_bg = config.window_target.enabled
-                        && config.window_target.hwnd != 0
-                        && WinInput::is_window_valid(config.window_target.hwnd);
-                    let target_hwnd = if is_bg { config.window_target.hwnd } else { 0 };
-
-                    let (cur_x, cur_y) = WinInput::get_cursor_pos();
-                    if !is_bg && adv.corner_panic && cur_x <= 5 && cur_y <= 5 {
-                        break;
-                    }
-
                     let mut popup_clicked = false;
 
                     // 1. Popup Hunter Step (Direct Real-time Screen Target Recognition)
                     if config.hunter_enabled {
                         let (screen_opt, offset_x, offset_y) = if is_bg {
                             match ScreenCapture::capture_window(target_hwnd) {
-                                Some(cap) => (Some(cap), 0, 0),
-                                None => {
+                                Some(cap) if cap.buffer.iter().take(20000).any(|&b| b > 0) => (Some(cap), 0, 0),
+                                _ => {
                                     if let Some((l, t, r, b)) = WinInput::get_window_screen_rect(target_hwnd) {
                                         let w = (r - l).max(1);
                                         let h = (b - t).max(1);
@@ -1089,24 +1059,23 @@ impl EngineState {
                                         config.popup_hold_ms,
                                     );
                                 } else {
-                                    WinInput::set_cursor_pos(final_x, final_y);
-                                    PrecisionTimer::sleep_ms(6.0); // Allow OS and game to register hover
-
-                                    let hold = config.popup_hold_ms.max(35.0);
-                                    WinInput::mouse_down(MouseButton::Left);
-                                    PrecisionTimer::sleep_ms(hold);
-                                    WinInput::mouse_up(MouseButton::Left);
-
-                                    if config.return_cursor {
-                                        PrecisionTimer::sleep_ms(5.0);
-                                        WinInput::set_cursor_pos(orig_pos.0, orig_pos.1);
-                                    }
+                                    let _ = WinInput::send_hardware_click(
+                                        final_x,
+                                        final_y,
+                                        MouseButton::Left,
+                                        config.popup_hold_ms,
+                                        config.return_cursor,
+                                        orig_pos.0,
+                                        orig_pos.1,
+                                        WinInput::get_foreground_window(),
+                                        &running,
+                                    );
                                 }
 
                                 total.fetch_add(1, Ordering::Relaxed);
                                 popup_clicked = true;
                                 popup_detector.reset();
-                                PrecisionTimer::sleep_ms(config.popup_cooldown_ms.max(50.0));
+                                interruptible_wait(&running, config.popup_cooldown_ms.max(50.0));
                             }
                         }
                     }
@@ -1139,7 +1108,7 @@ impl EngineState {
                                 );
                             } else {
                                 WinInput::mouse_down(config.farm_button);
-                                PrecisionTimer::sleep_ms(config.farm_hold_ms.max(15.0));
+                                interruptible_wait(&running, config.farm_hold_ms.max(15.0));
                                 WinInput::mouse_up(config.farm_button);
                             }
 
@@ -1148,11 +1117,26 @@ impl EngineState {
                         }
                     }
 
-                    PrecisionTimer::sleep_ms(config.scan_interval_ms.max(10.0));
+                    interruptible_wait(&running, config.scan_interval_ms.max(10.0));
                 }
 
                 running.store(false, Ordering::Relaxed);
             });
+            if let Ok(mut slot) = self.worker.lock() { *slot = Some(worker); }
         }
+    }
+}
+
+fn interruptible_wait(running: &AtomicBool, ms: f64) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs_f64(ms.max(0.0) / 1000.0);
+    while running.load(Ordering::Relaxed) && std::time::Instant::now() < deadline {
+        thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+impl Drop for EngineState {
+    fn drop(&mut self) {
+        self.stop();
+        self.join_previous_worker();
     }
 }

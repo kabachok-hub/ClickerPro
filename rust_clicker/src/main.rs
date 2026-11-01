@@ -2,7 +2,11 @@
 
 mod app;
 mod engine;
+mod diagnostics;
 mod hotkeys;
+mod hunter;
+#[cfg(test)]
+mod hunter_tests;
 mod precision_timer;
 mod screen_capture;
 mod vision;
@@ -18,8 +22,8 @@ fn main() -> eframe::Result<()> {
     PrecisionTimer::init();
 
     let mut viewport = eframe::egui::ViewportBuilder::default()
-        .with_inner_size([920.0, 680.0])
-        .with_min_inner_size([840.0, 600.0])
+        .with_inner_size([1000.0, 650.0])
+        .with_min_inner_size([880.0, 580.0])
         .with_title("⚡ Автокликер Pro (Rust)");
 
     // Try to load embedded icon
