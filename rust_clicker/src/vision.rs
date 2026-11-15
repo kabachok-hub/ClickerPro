@@ -32,6 +32,7 @@ pub struct ButtonTemplate {
     pub width: u32,
     pub height: u32,
     pub bgra: Vec<u8>,
+    pub hue_invariant: bool,
     pub sample_points: Vec<(u32, u32, u8, u8, u8)>, // (dx, dy, r, g, b)
     pub threshold: f32, // 0.60 to 0.99 (default 0.82)
     pub click_button: MouseButton,
@@ -77,6 +78,25 @@ impl ButtonTemplate {
                 sample_points.push((i as u32 % width, i as u32 / width, p[2], p[1], p[0]));
             }
         }
+        // Only cut-out rainbow circles qualify. Ordinary image matching retains exact RGB.
+        let mut hues=[0usize;6];
+        let mut dark=0; let mut light=0; let mut visible=0;
+        for p in bgra.chunks_exact(4).filter(|p|p[3]>=128) {
+            visible+=1;
+            let (r,g,b)=(p[2] as i32,p[1] as i32,p[0] as i32);
+            let hi=r.max(g).max(b); let lo=r.min(g).min(b);
+            if hi<85 {dark+=1;}
+            if lo>185 {light+=1;}
+            if hi-lo>60 {
+                let hue=if hi==r {(g-b) as f32/(hi-lo) as f32}
+                    else if hi==g {2.0+(b-r) as f32/(hi-lo) as f32}
+                    else {4.0+(r-g) as f32/(hi-lo) as f32};
+                hues[hue.rem_euclid(6.0) as usize]+=1;
+            }
+        }
+        let hue_invariant=visible>0 && visible*100 < bgra.len()/4*95
+            && dark*100>visible*8 && light*100>visible*5
+            && hues.iter().filter(|&&n| n*100>visible*2).count()>=4;
         Self {
             id,
             name,
@@ -84,10 +104,11 @@ impl ButtonTemplate {
             height,
             bgra,
             sample_points,
+            hue_invariant,
             threshold,
             click_button: MouseButton::Left,
             click_type: ClickType::Single,
-            hold_ms: 100.0,
+            hold_ms: 45.0,
             enabled: true,
         }
     }
@@ -140,6 +161,16 @@ impl ButtonTemplate {
 
 // A cut-out of a round bonus should not encode the moving scenery behind its corners.
 fn isolate_circle_sample(w: u32, h: u32, pixels: Vec<u8>) -> (u32, u32, Vec<u8>) {
+    if pixels.len() != (w as usize*h as usize*4) { return (w,h,pixels); }
+    let (cw,ch,prepared)=isolate_single_color_circle(w,h,pixels);
+    if prepared.chunks_exact(4).any(|p|p[3]==0) { return (cw,ch,prepared); }
+    if (20..=512).contains(&cw) && (20..=512).contains(&ch) {
+        if let Some(circle)=isolate_outlined_circle(cw,ch,&prepared) { return circle; }
+    }
+    (cw,ch,prepared)
+}
+
+fn isolate_single_color_circle(w: u32, h: u32, pixels: Vec<u8>) -> (u32, u32, Vec<u8>) {
     if w < 20 || h < 20 || w > 512 || h > 512 || pixels.len() != (w*h*4) as usize { return (w,h,pixels); }
     let rgb = |x: u32, y: u32| { let i=((y*w+x)*4) as usize; [pixels[i+2],pixels[i+1],pixels[i]] };
     let vibrant = |p: [u8;3]| p.iter().max().unwrap()-p.iter().min().unwrap() > 60;
@@ -170,6 +201,49 @@ fn isolate_circle_sample(w: u32, h: u32, pixels: Vec<u8>) -> (u32, u32, Vec<u8>)
         if dx*dx+dy*dy>0.98 { *result.last_mut().unwrap()=0; }
     } }
     (bw,bh,result)
+}
+
+// A rainbow bonus has no dominant hue. Fit its dark circular outline instead.
+// This only prepares a sample; screen candidates still need full template comparison.
+fn isolate_outlined_circle(w: u32, h: u32, pixels: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
+    let rgb = |x: i32, y: i32| {
+        if x < 0 || y < 0 || x >= w as i32 || y >= h as i32 { return [255;3]; }
+        let i = ((y as u32*w+x as u32)*4) as usize;
+        [pixels[i+2],pixels[i+1],pixels[i]]
+    };
+    let size = w.min(h) as i32;
+    let mut best = None;
+    let mut best_hits = 0;
+    for cy in ((h as i32*35/100)..=(h as i32*65/100)).step_by(2) {
+        for cx in ((w as i32*35/100)..=(w as i32*65/100)).step_by(2) {
+            for radius in (size*36/100..=size*58/100).step_by(2) {
+                let mut hits=0;
+                let mut colorful=0;
+                for n in 0..48 {
+                    let a=n as f32*std::f32::consts::TAU/48.0;
+                    let at = |r: f32| rgb((cx as f32+r*a.cos()).round() as i32,(cy as f32+r*a.sin()).round() as i32);
+                    if (-1..=1).any(|d| at((radius+d) as f32).iter().all(|&v|v<85)) { hits+=1; }
+                    let p=at(radius as f32*0.8);
+                    if p.iter().max().unwrap()-p.iter().min().unwrap()>60 { colorful+=1; }
+                }
+                if colorful>=20 && hits>best_hits {
+                    best_hits=hits; best=Some((cx,cy,radius));
+                }
+            }
+        }
+    }
+    if best_hits < 38 { return None; }
+    let (cx,cy,r)=best?;
+    // Include the outline, discard scenery and labels outside the circle.
+    let (x1,y1,x2,y2)=((cx-r).max(0),(cy-r).max(0),(cx+r).min(w as i32-1),(cy+r).min(h as i32-1));
+    let (cw,ch)=((x2-x1+1) as u32,(y2-y1+1) as u32);
+    let mut result=Vec::with_capacity((cw*ch*4) as usize);
+    for y in y1..=y2 { for x in x1..=x2 {
+        let i=((y as u32*w+x as u32)*4) as usize;
+        result.extend_from_slice(&pixels[i..i+4]);
+        if (x-cx)*(x-cx)+(y-cy)*(y-cy)>r*r { *result.last_mut().unwrap()=0; }
+    }}
+    Some((cw,ch,result))
 }
 
 #[derive(Debug, Clone)]
@@ -252,6 +326,13 @@ pub struct MatchResult {
     pub confidence: f32,
 }
 
+fn template_pixel_difference(mut screen: [u8;3], mut sample: [u8;3], hue_invariant: bool) -> u32 {
+    // Hue animation can permute channels, while black outline and pale hand remain distinct.
+    // Preserve brightness/saturation and every pixel's position; a solid color cannot match.
+    if hue_invariant { screen.sort_unstable(); sample.sort_unstable(); }
+    screen.iter().zip(sample).map(|(&a,b)|a.abs_diff(b) as u32).sum()
+}
+
 pub struct VisionEngine;
 
 impl VisionEngine {
@@ -274,6 +355,51 @@ impl VisionEngine {
     }
 
     pub fn find_template_candidates(
+        screen: &ScreenCapture,
+        template: &ButtonTemplate,
+        region_opt: Option<(i32, i32, i32, i32)>,
+        running: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Vec<MatchResult> {
+        let factor = (template.width.min(template.height) / 32).min(6);
+        if factor < 2 || region_opt.is_some() || screen.width <= 0 || screen.height <= 0
+            || screen.buffer.len() != screen.width as usize*screen.height as usize*4
+            || template.bgra.len() != template.width as usize*template.height as usize*4 {
+            return Self::find_template_candidates_exact(screen,template,region_opt,running);
+        }
+        // Locate on a small image, then verify original pixels near each candidate.
+        // The final confidence and occlusion checks always use the full-resolution image.
+        let reduce = |width: u32, height: u32, pixels: &[u8]| {
+            let (w,h)=(width/factor,height/factor);
+            let mut output=Vec::with_capacity((w*h*4) as usize);
+            for y in 0..h { for x in 0..w {
+                let i=(((y*factor)*width+x*factor)*4) as usize;
+                output.extend_from_slice(&pixels[i..i+4]);
+            }}
+            (w,h,output)
+        };
+        let (sw,sh,pixels)=reduce(screen.width as u32,screen.height as u32,&screen.buffer);
+        let small=ScreenCapture {width:sw as i32,height:sh as i32,buffer:pixels};
+        let (tw,th,pixels)=reduce(template.width,template.height,&template.bgra);
+        let mut coarse=ButtonTemplate::new(template.id,template.name.clone(),tw,th,pixels,
+            (template.threshold-0.06).max(0.70));
+        coarse.hue_invariant=template.hue_invariant;
+        let candidates=Self::find_template_candidates_exact(&small,&coarse,None,running);
+        let mut result: Vec<MatchResult>=Vec::new();
+        for candidate in candidates {
+            if running.is_some_and(|r| !r.load(std::sync::atomic::Ordering::Relaxed)) { return Vec::new(); }
+            let (x,y)=(candidate.x*factor as i32,candidate.y*factor as i32);
+            let pad=factor as i32*2;
+            for found in Self::find_template_candidates_exact(screen,template,
+                Some((x-pad,y-pad,x+template.width as i32+pad,y+template.height as i32+pad)),running) {
+                if !result.iter().any(|m| (m.center_x-found.center_x).abs()<(template.width as i32/2).max(2)
+                    && (m.center_y-found.center_y).abs()<(template.height as i32/2).max(2)) { result.push(found); }
+            }
+        }
+        result.sort_by(|a,b|b.confidence.total_cmp(&a.confidence));
+        result
+    }
+
+    fn find_template_candidates_exact(
         screen: &ScreenCapture,
         template: &ButtonTemplate,
         region_opt: Option<(i32, i32, i32, i32)>,
@@ -346,9 +472,7 @@ impl VisionEngine {
                         let sg = screen_buf[s_idx + 1];
                         let sr = screen_buf[s_idx + 2];
 
-                        let diff = (sr as i32 - tr as i32).abs() as u32
-                            + (sg as i32 - tg as i32).abs() as u32
-                            + (sb as i32 - tb as i32).abs() as u32;
+                        let diff = template_pixel_difference([sr,sg,sb],[tr,tg,tb],template.hue_invariant);
 
                         coarse_diff += diff;
                         if coarse_diff > max_allowed_coarse_diff {
@@ -382,9 +506,7 @@ impl VisionEngine {
                                 let tg = tmpl_buf[t_i + 1];
                                 let tr = tmpl_buf[t_i + 2];
 
-                                let d = (sr as i32 - tr as i32).abs() as u64
-                                    + (sg as i32 - tg as i32).abs() as u64
-                                    + (sb as i32 - tb as i32).abs() as u64;
+                                let d = template_pixel_difference([sr,sg,sb],[tr,tg,tb],template.hue_invariant) as u64;
 
                                 total_diff += d;
                                 if total_diff > max_allowed_total_diff {

@@ -540,13 +540,12 @@ fn sparse_transparent_png_can_be_loaded_and_matched() {
 }
 
 #[test]
-fn actual_user_yellow_hand_sample_is_detected_and_ignores_background() {
-    let path=std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap()).join("ClickerPro/last-template.png");
-    if !path.exists() { return; }
-    let img=image::open(path).unwrap().to_rgba8();
-    let (w,h)=img.dimensions();
-    let pixels:Vec<u8>=img.pixels().flat_map(|p|[p[2],p[1],p[0],255]).collect();
-    let capture=ScreenCapture {width:w as i32,height:h as i32,buffer:pixels};
+fn yellow_hand_sample_is_detected_and_ignores_background() {
+    // Deterministic fixture: user samples change whenever F8 saves another target.
+    let mut capture=blank(100,100);
+    paint_round_bonus(&mut capture,50,50,38);
+    rectangle(&mut capture,46,41,8,18,[245,220,40]);
+    rectangle(&mut capture,42,47,16,6,[245,220,40]);
     let sample=ButtonTemplate::from_capture(1,"actual".into(),&capture,0.90);
     assert!(sample.bgra.chunks_exact(4).any(|p|p[3]==0),"Real sample must discard scenery corners");
     let strict=VisionConfig {strict_circles:true,require_white_icon:true,only_new_targets:false,..Default::default()};

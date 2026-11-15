@@ -136,13 +136,7 @@ impl ClickerApp {
 
             scroll_cfg: ScrollConfig::default(),
 
-            points: vec![RoutePoint {
-                x: cx,
-                y: cy,
-                button: MouseButton::Left,
-                delay_after_ms: 100.0,
-                hold_ms: 0.0,
-            }],
+            points: Vec::new(),
             new_pt_x: cx,
             new_pt_y: cy,
             new_pt_delay: 150.0,
@@ -277,6 +271,7 @@ impl ClickerApp {
                 self.engine.toggle_scroll(self.scroll_cfg.clone(), self.advanced_cfg.clone());
             }
             ActiveTab::Points => {
+                self.engine.update_route_points(self.points.clone());
                 self.engine.toggle_route(self.points.clone(), self.advanced_cfg.clone());
             }
             ActiveTab::Vision => {
@@ -724,6 +719,7 @@ impl eframe::App for ClickerApp {
                             delay_after_ms: self.new_pt_delay,
                             hold_ms: self.new_pt_hold,
                         });
+                        self.engine.update_route_points(self.points.clone());
                     } else if self.active_tab == ActiveTab::Vision {
                         self.handle_vision_snip_hotkey(cx, cy);
                     }
@@ -1144,13 +1140,15 @@ impl ClickerApp {
                 ui.add_space(8.0);
                 ui.label(RichText::new("Быстро:").size(11.5).color(Color32::from_rgb(139, 148, 158)));
                 let keys = [
+                    ("W", 0x57),
                     ("Space", 0x20),
                     ("E", 0x45),
                     ("Q", 0x51),
                     ("F", 0x46),
+                    ("Shift", 0x10),
+                    ("Ctrl", 0x11),
                     ("1", 0x31),
                     ("2", 0x32),
-                    ("Shift", 0x10),
                     ("Enter", 0x0D),
                 ];
                 for (name, code) in keys {
@@ -1172,32 +1170,41 @@ impl ClickerApp {
 
                 if self.kb_cfg.mode == KeyMode::Hold {
                     ui.add_space(8.0);
-                    ui.label("Удержание:");
+                    ui.checkbox(
+                        &mut self.kb_cfg.continuous_hold,
+                        RichText::new("Постоянно зажата (до F6)").color(Color32::from_rgb(88, 166, 255)),
+                    );
+                    if !self.kb_cfg.continuous_hold {
+                        ui.add_space(8.0);
+                        ui.label("Время зажатия:");
+                        ui.add(
+                            egui::DragValue::new(&mut self.kb_cfg.hold_ms)
+                                .speed(5.0)
+                                .range(10.0..=60000.0)
+                                .suffix(" мс"),
+                        );
+                    }
+                }
+
+                if self.kb_cfg.mode == KeyMode::Tap || (self.kb_cfg.mode == KeyMode::Hold && !self.kb_cfg.continuous_hold) {
+                    ui.add_space(8.0);
+                    ui.label("Интервал:");
                     ui.add(
-                        egui::DragValue::new(&mut self.kb_cfg.hold_ms)
-                            .speed(5.0)
+                        egui::DragValue::new(&mut self.kb_cfg.interval_ms)
+                            .speed(2.0)
                             .range(1.0..=60000.0)
                             .suffix(" мс"),
                     );
+
+                    ui.add_space(8.0);
+                    ui.label("Jitter:");
+                    ui.add(
+                        egui::DragValue::new(&mut self.kb_cfg.jitter_ms)
+                            .speed(1.0)
+                            .range(0.0..=500.0)
+                            .suffix(" ±мс"),
+                    );
                 }
-
-                ui.add_space(8.0);
-                ui.label("Интервал:");
-                ui.add(
-                    egui::DragValue::new(&mut self.kb_cfg.interval_ms)
-                        .speed(2.0)
-                        .range(1.0..=60000.0)
-                        .suffix(" мс"),
-                );
-
-                ui.add_space(8.0);
-                ui.label("Jitter:");
-                ui.add(
-                    egui::DragValue::new(&mut self.kb_cfg.jitter_ms)
-                        .speed(1.0)
-                        .range(0.0..=500.0)
-                        .suffix(" ±мс"),
-                );
             });
         });
     }
@@ -1270,12 +1277,17 @@ impl ClickerApp {
                         delay_after_ms: self.new_pt_delay,
                         hold_ms: self.new_pt_hold,
                     });
+                    self.engine.update_route_points(self.points.clone());
                 }
 
                 if !self.points.is_empty() {
                     ui.add_space(6.0);
                     if ui.small_button(RichText::new("🗑️").color(Color32::from_rgb(248, 81, 73))).clicked() {
                         self.points.clear();
+                        self.engine.update_route_points(Vec::new());
+                        if self.engine.is_running() {
+                            self.engine.stop();
+                        }
                     }
                 }
             });
@@ -1301,7 +1313,21 @@ impl ClickerApp {
                 });
                 if let Some(i) = remove_idx {
                     self.points.remove(i);
+                    self.engine.update_route_points(self.points.clone());
+                    if self.points.is_empty() && self.engine.is_running() {
+                        self.engine.stop();
+                    }
                 }
+            } else {
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(format!(
+                        "Точек нет. Наведите курсор на нужную позицию в игре и нажмите [{}] для добавления.",
+                        self.pick_key_name
+                    ))
+                    .size(11.5)
+                    .color(Color32::from_rgb(139, 148, 158)),
+                );
             }
         });
     }

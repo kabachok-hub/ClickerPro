@@ -4,19 +4,20 @@ use winapi::shared::windef::{HWND, POINT, RECT};
 use winapi::um::winuser::{
     AttachThreadInput, ClientToScreen, EnumWindows, GetAncestor, GetClientRect, GetCursorPos,
     GetForegroundWindow, GetSystemMetrics, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId,
-    IsWindow, IsWindowVisible, MapWindowPoints, PostMessageW, RealChildWindowFromPoint, ScreenToClient,
-    SendInput, SetCursorPos, SetForegroundWindow, WindowFromPoint, GA_ROOT, INPUT, INPUT_KEYBOARD,
-    INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MK_LBUTTON, MK_MBUTTON, MK_RBUTTON,
-    MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN,
-    MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL,
-    MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT, WM_KEYDOWN, WM_KEYUP,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN,
-    WM_RBUTTONUP, XBUTTON1, XBUTTON2,
+    IsWindow, IsWindowVisible, MapVirtualKeyW, MapWindowPoints, PostMessageW, RealChildWindowFromPoint,
+    ScreenToClient, SendInput, SetCursorPos, SetForegroundWindow, WindowFromPoint, GA_ROOT, INPUT,
+    INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP,
+    KEYEVENTF_UNICODE, MK_LBUTTON, MK_MBUTTON, MK_RBUTTON, MOUSEEVENTF_HWHEEL,
+    MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
+    MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN,
+    MOUSEEVENTF_XUP, MOUSEINPUT, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, XBUTTON1, XBUTTON2,
 };
 
 #[link(name = "user32")]
 extern "system" {
     fn mouse_event(dwFlags: u32, dx: u32, dy: u32, dwData: u32, dwExtraInfo: usize);
+    fn keybd_event(bVk: u8, bScan: u8, dwFlags: u32, dwExtraInfo: usize);
 }
 
 #[link(name = "shell32")]
@@ -229,8 +230,8 @@ impl WinInput {
                 MouseButton::X2 => (MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, XBUTTON2 as u32),
             };
 
-            // 1. Physically move cursor to target position via SetCursorPos
-            SetCursorPos(x, y);
+            // 1. Move only after a verified match; report failures instead of claiming a click.
+            if SetCursorPos(x, y)==0 { return Err("Windows отклонила перемещение курсора".into()); }
 
             // Also send SendInput Move (0x0001 | 0x8000) so RawInput/DirectInput registers hardware cursor transition
             let sx = GetSystemMetrics(winapi::um::winuser::SM_XVIRTUALSCREEN);
@@ -262,6 +263,12 @@ impl WinInput {
                 || !Self::get_window_at_point(x, y).is_some_and(|w| w.hwnd == expected_hwnd) {
                 restore_cursor();
                 return Err("Клик отменён: остановка или смена активного окна".into());
+            }
+
+            let actual=Self::get_cursor_pos();
+            if (actual.0-x).abs()>8 || (actual.1-y).abs()>8 {
+                restore_cursor();
+                return Err("Курсор не дошёл до цели: игра удерживает мышь или курсор был перемещён".into());
             }
 
             // 3. A single MouseDown through SendInput
@@ -381,42 +388,68 @@ impl WinInput {
         }
     }
 
+    pub fn is_extended_key(vk: u16) -> bool {
+        matches!(
+            vk,
+            0x21..=0x2E   // Prior (PageUp), Next (PageDown), End, Home, Left, Up, Right, Down, Select, Print, Execute, Snapshot, Insert, Delete
+            | 0x5B..=0x5D // LWin, RWin, Apps
+            | 0x6F        // Num /
+            | 0xA3        // RControl
+            | 0xA5        // RMenu (RAlt)
+        )
+    }
+
     pub fn key_down(vk_code: u16) {
         unsafe {
+            let scan = MapVirtualKeyW(vk_code as u32, 0) as u16;
+            let mut flags = 0u32;
+            if Self::is_extended_key(vk_code) {
+                flags |= KEYEVENTF_EXTENDEDKEY;
+            }
+
             let mut input = INPUT {
                 type_: INPUT_KEYBOARD,
                 u: std::mem::zeroed(),
             };
             *input.u.ki_mut() = KEYBDINPUT {
                 wVk: vk_code,
-                wScan: 0,
-                dwFlags: 0,
+                wScan: scan,
+                dwFlags: flags,
                 time: 0,
                 dwExtraInfo: 0,
             };
             SendInput(1, &mut input, size_of::<INPUT>() as i32);
+            keybd_event(vk_code as u8, scan as u8, flags, 0);
         }
     }
 
     pub fn key_up(vk_code: u16) {
         unsafe {
+            let scan = MapVirtualKeyW(vk_code as u32, 0) as u16;
+            let mut flags = KEYEVENTF_KEYUP;
+            if Self::is_extended_key(vk_code) {
+                flags |= KEYEVENTF_EXTENDEDKEY;
+            }
+
             let mut input = INPUT {
                 type_: INPUT_KEYBOARD,
                 u: std::mem::zeroed(),
             };
             *input.u.ki_mut() = KEYBDINPUT {
                 wVk: vk_code,
-                wScan: 0,
-                dwFlags: KEYEVENTF_KEYUP,
+                wScan: scan,
+                dwFlags: flags,
                 time: 0,
                 dwExtraInfo: 0,
             };
             SendInput(1, &mut input, size_of::<INPUT>() as i32);
+            keybd_event(vk_code as u8, scan as u8, flags, 0);
         }
     }
 
     pub fn key_tap(vk_code: u16) {
         Self::key_down(vk_code);
+        crate::precision_timer::PrecisionTimer::sleep_ms(25.0);
         Self::key_up(vk_code);
     }
 
@@ -842,8 +875,8 @@ impl WinInput {
         }
     }
 
-    /// Background Key Tap directly to a target window via PostMessageW.
-    pub fn post_key_tap_to_window(hwnd_val: usize, vk_code: u16, hold_ms: f64) {
+    /// Background Key Down directly to a target window via PostMessageW.
+    pub fn post_key_down_to_window(hwnd_val: usize, vk_code: u16) {
         if hwnd_val == 0 {
             return;
         }
@@ -852,13 +885,36 @@ impl WinInput {
             if IsWindow(hwnd) == 0 {
                 return;
             }
-            PostMessageW(hwnd, WM_KEYDOWN, vk_code as WPARAM, 1 as LPARAM);
-            if hold_ms > 0.0 {
-                crate::precision_timer::PrecisionTimer::sleep_ms(hold_ms);
+            let scan = MapVirtualKeyW(vk_code as u32, 0) as u32;
+            let ext = if Self::is_extended_key(vk_code) { 1u32 << 24 } else { 0u32 };
+            let down_lparam = 1 | (scan << 16) | ext;
+            PostMessageW(hwnd, WM_KEYDOWN, vk_code as WPARAM, down_lparam as LPARAM);
+        }
+    }
+
+    /// Background Key Up directly to a target window via PostMessageW.
+    pub fn post_key_up_to_window(hwnd_val: usize, vk_code: u16) {
+        if hwnd_val == 0 {
+            return;
+        }
+        unsafe {
+            let hwnd = hwnd_val as HWND;
+            if IsWindow(hwnd) == 0 {
+                return;
             }
-            let up_lparam = 1 | (1 << 30) | (1 << 31);
+            let scan = MapVirtualKeyW(vk_code as u32, 0) as u32;
+            let ext = if Self::is_extended_key(vk_code) { 1u32 << 24 } else { 0u32 };
+            let up_lparam = 1 | (scan << 16) | ext | (1 << 30) | (1 << 31);
             PostMessageW(hwnd, WM_KEYUP, vk_code as WPARAM, up_lparam as LPARAM);
         }
+    }
+
+    /// Background Key Tap directly to a target window via PostMessageW.
+    pub fn post_key_tap_to_window(hwnd_val: usize, vk_code: u16, hold_ms: f64) {
+        Self::post_key_down_to_window(hwnd_val, vk_code);
+        let hold = if hold_ms > 0.0 { hold_ms } else { 25.0 };
+        crate::precision_timer::PrecisionTimer::sleep_ms(hold);
+        Self::post_key_up_to_window(hwnd_val, vk_code);
     }
 }
 

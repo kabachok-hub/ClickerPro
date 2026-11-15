@@ -66,6 +66,7 @@ pub struct KeyboardConfig {
     pub vk_code: u16,
     pub key_name: String,
     pub mode: KeyMode,
+    pub continuous_hold: bool,
     pub hold_ms: f64,
     pub interval_ms: f64,
     pub jitter_ms: f64,
@@ -78,6 +79,7 @@ impl Default for KeyboardConfig {
             vk_code: 0x20, // Spacebar
             key_name: "Space".to_string(),
             mode: KeyMode::Tap,
+            continuous_hold: true,
             hold_ms: 150.0,
             interval_ms: 50.0,
             jitter_ms: 0.0,
@@ -276,6 +278,8 @@ pub struct EngineState {
     worker: std::sync::Mutex<Option<thread::JoinHandle<()>>>,
     pub total_clicks: Arc<AtomicU64>,
     pub last_target: Arc<std::sync::Mutex<Option<(i32, i32)>>>,
+    pub route_points: Arc<std::sync::RwLock<Vec<RoutePoint>>>,
+    pub current_held_key: Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl EngineState {
@@ -286,6 +290,8 @@ impl EngineState {
             worker: std::sync::Mutex::new(None),
             total_clicks: Arc::new(AtomicU64::new(0)),
             last_target: Arc::new(std::sync::Mutex::new(None)),
+            route_points: Arc::new(std::sync::RwLock::new(Vec::new())),
+            current_held_key: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
     }
 
@@ -295,6 +301,16 @@ impl EngineState {
 
     pub fn stop(&self) {
         self.running.store(false, Ordering::Relaxed);
+        let held = self.current_held_key.swap(0, Ordering::Relaxed);
+        if held != 0 {
+            WinInput::key_up(held as u16);
+        }
+    }
+
+    pub fn update_route_points(&self, points: Vec<RoutePoint>) {
+        if let Ok(mut lock) = self.route_points.write() {
+            *lock = points;
+        }
     }
 
     fn join_previous_worker(&self) {
@@ -580,20 +596,19 @@ impl EngineState {
             self.running.store(true, Ordering::Relaxed);
             let running = self.running.clone();
             let total = self.total_clicks.clone();
+            let current_held_key = self.current_held_key.clone();
 
             let worker = thread::spawn(move || {
                 let mut rng = rand::thread_rng();
                 let mut count = 0;
                 let session_start = std::time::Instant::now();
 
-                // True Continuous Key Hold Mode
-                if config.mode == KeyMode::Hold && config.hold_ms <= 0.0 {
+                // 1. True Continuous Key Hold Mode (Key stays pressed down continuously until F6 / Stop)
+                if config.mode == KeyMode::Hold && config.continuous_hold {
                     if adv.window_target.enabled && adv.window_target.hwnd != 0 {
                         let hwnd = adv.window_target.hwnd;
                         if WinInput::is_window_valid(hwnd) {
-                            unsafe {
-                                winapi::um::winuser::PostMessageW(hwnd as winapi::shared::windef::HWND, winapi::um::winuser::WM_KEYDOWN, config.vk_code as winapi::shared::minwindef::WPARAM, 1 as winapi::shared::minwindef::LPARAM);
-                            }
+                            WinInput::post_key_down_to_window(hwnd, config.vk_code);
                             total.fetch_add(1, Ordering::Relaxed);
                             while running.load(Ordering::Relaxed) {
                                 if adv.session_limit_enabled && session_start.elapsed().as_secs() >= adv.session_limit_seconds {
@@ -601,12 +616,10 @@ impl EngineState {
                                 }
                                 interruptible_wait(&running, 20.0);
                             }
-                            unsafe {
-                                let up_lparam = 1 | (1 << 30) | (1 << 31);
-                                winapi::um::winuser::PostMessageW(hwnd as winapi::shared::windef::HWND, winapi::um::winuser::WM_KEYUP, config.vk_code as winapi::shared::minwindef::WPARAM, up_lparam as winapi::shared::minwindef::LPARAM);
-                            }
+                            WinInput::post_key_up_to_window(hwnd, config.vk_code);
                         }
                     } else {
+                        current_held_key.store(config.vk_code as u32, Ordering::Relaxed);
                         WinInput::key_down(config.vk_code);
                         total.fetch_add(1, Ordering::Relaxed);
                         while running.load(Ordering::Relaxed) {
@@ -620,11 +633,13 @@ impl EngineState {
                             interruptible_wait(&running, 20.0);
                         }
                         WinInput::key_up(config.vk_code);
+                        current_held_key.store(0, Ordering::Relaxed);
                     }
                     running.store(false, Ordering::Relaxed);
                     return;
                 }
 
+                // 2. Tap or Repeated Hold Mode
                 while running.load(Ordering::Relaxed) {
                     // Session duration limit
                     if adv.session_limit_enabled
@@ -684,9 +699,11 @@ impl EngineState {
                             WinInput::key_tap(config.vk_code);
                         }
                         KeyMode::Hold => {
+                            current_held_key.store(config.vk_code as u32, Ordering::Relaxed);
                             WinInput::key_down(config.vk_code);
                             interruptible_wait(&running, config.hold_ms);
                             WinInput::key_up(config.vk_code);
+                            current_held_key.store(0, Ordering::Relaxed);
                         }
                     }
 
@@ -702,6 +719,10 @@ impl EngineState {
                     interruptible_wait(&running, delay);
                 }
 
+                let held = current_held_key.swap(0, Ordering::Relaxed);
+                if held != 0 {
+                    WinInput::key_up(held as u16);
+                }
                 running.store(false, Ordering::Relaxed);
             });
             if let Ok(mut slot) = self.worker.lock() { *slot = Some(worker); }
@@ -772,11 +793,23 @@ impl EngineState {
     pub fn toggle_route(&self, points: Vec<RoutePoint>, adv: AdvancedConfig) {
         if self.is_running() {
             self.stop();
-        } else if !points.is_empty() {
+        } else {
+            self.update_route_points(points);
+            let has_points = {
+                match self.route_points.read() {
+                    Ok(lock) => !lock.is_empty(),
+                    Err(_) => false,
+                }
+            };
+            if !has_points {
+                return;
+            }
+
             self.join_previous_worker();
             self.running.store(true, Ordering::Relaxed);
             let running = self.running.clone();
             let total = self.total_clicks.clone();
+            let route_points = self.route_points.clone();
 
             let worker = thread::spawn(move || {
                 let mut idx = 0;
@@ -794,6 +827,21 @@ impl EngineState {
                         break;
                     }
 
+                    // Dynamically fetch the current route points on each iteration!
+                    // If a user deletes a point, it is instantly reflected without restarts.
+                    let current_pts = {
+                        match route_points.read() {
+                            Ok(lock) => lock.clone(),
+                            Err(_) => break,
+                        }
+                    };
+                    if current_pts.is_empty() {
+                        break;
+                    }
+
+                    idx = idx % current_pts.len();
+                    let pt = current_pts[idx].clone();
+
                     // Background window mode for route points
                     if adv.window_target.enabled && adv.window_target.hwnd != 0 {
                         let hwnd = adv.window_target.hwnd;
@@ -801,7 +849,6 @@ impl EngineState {
                             interruptible_wait(&running, 150.0);
                             continue;
                         }
-                        let pt = &points[idx];
                         WinInput::post_mouse_click_to_window(
                             hwnd,
                             pt.x,
@@ -812,7 +859,7 @@ impl EngineState {
                         );
                         total.fetch_add(1, Ordering::Relaxed);
                         interruptible_wait(&running, pt.delay_after_ms.max(10.0));
-                        idx = (idx + 1) % points.len();
+                        idx = (idx + 1) % current_pts.len();
                         continue;
                     }
 
@@ -827,21 +874,17 @@ impl EngineState {
                         }
                     }
 
-                    let pt = &points[idx];
                     WinInput::set_cursor_pos(pt.x, pt.y);
 
-                    if pt.hold_ms > 0.0 {
-                        WinInput::mouse_down(pt.button);
-                        interruptible_wait(&running, pt.hold_ms);
-                        WinInput::mouse_up(pt.button);
-                    } else {
-                        WinInput::mouse_click(pt.button);
-                    }
+                    let hold = if pt.hold_ms > 0.0 { pt.hold_ms } else { 20.0 };
+                    WinInput::mouse_down(pt.button);
+                    interruptible_wait(&running, hold);
+                    WinInput::mouse_up(pt.button);
 
                     total.fetch_add(1, Ordering::Relaxed);
                     interruptible_wait(&running, pt.delay_after_ms.max(10.0));
 
-                    idx = (idx + 1) % points.len();
+                    idx = (idx + 1) % current_pts.len();
                 }
 
                 running.store(false, Ordering::Relaxed);
@@ -872,6 +915,11 @@ impl EngineState {
             let started = std::time::Instant::now();
             let mut log = crate::diagnostics::HunterLog::new();
             log.event(&format!("START target={:#x} title={} mode={:?}", adv.window_target.hwnd, adv.window_target.title, config.mode));
+            for template in &config.templates {
+                log.event(&format!("SAMPLE {}x{} threshold={:.2} hue_invariant={} enabled={}",
+                    template.width,template.height,template.threshold,template.hue_invariant,template.enabled));
+            }
+            let mut last_scan_log=std::time::Instant::now()-std::time::Duration::from_secs(5);
             let mut last_capture_error: Option<String> = None;
             let mut stop_reason = "User stop";
             let mut session = crate::hunter::HunterSession::new(config.clone());
@@ -911,13 +959,19 @@ impl EngineState {
                 };
                 let scan_start = std::time::Instant::now();
                 let observation = session.observe(&frame, started.elapsed(), Some(&running));
+                if last_scan_log.elapsed().as_secs()>=5 {
+                    log.event(&format!("SCAN {}x{} {:.1}ms matched={} input_pending={}",
+                        frame.image.width,frame.image.height,scan_start.elapsed().as_secs_f64()*1000.0,
+                        observation.target.is_some(),session.input_pending()));
+                    last_scan_log=std::time::Instant::now();
+                }
                 if let Ok(mut s) = status.lock() {
                     s.scans += 1;
                     s.scan_ms = scan_start.elapsed().as_secs_f64() * 1000.0;
                     s.frame_size = (frame.image.width, frame.image.height);
                     s.message = if session.input_pending() { "Нажимаю цель; продолжаю следить за следующей".into() }
                         else { "Поиск работает: ожидаю следующую цель".into() };
-                    if last_preview.elapsed().as_millis() >= 500 {
+                    if !observation.start_input && last_preview.elapsed().as_millis() >= 500 {
                         s.preview = Some(crate::hunter::preview(&frame, observation.target.as_ref()));
                         last_preview = std::time::Instant::now();
                     }

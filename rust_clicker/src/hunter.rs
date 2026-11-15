@@ -28,6 +28,8 @@ pub struct HunterSession {
     pending: Option<crate::vision::InputAttempt>,
     next_input_at: Duration,
     geometry: Option<(usize, i32, i32, i32, i32)>,
+    fast_configs: Vec<VisionConfig>,
+    scale_cursor: usize,
 }
 
 pub struct Observation {
@@ -37,8 +39,33 @@ pub struct Observation {
 
 impl HunterSession {
     pub fn new(config: VisionConfig) -> Self {
+        // Always check the original size on the current frame. Check one additional
+        // size per frame, instead of blocking all new captures on thirteen sizes.
+        let mut fast_configs=Vec::new();
+        if config.mode==VisionMode::TemplateMatch && config.multiscale && !config.only_new_targets {
+            for scale in [0.9,1.1,0.8,1.2,0.75,1.25,0.6,1.4,0.5,1.5,1.75,2.0] {
+                let mut next=config.clone();
+                next.multiscale=false;
+                for template in &config.templates {
+                    let w=(template.width as f32*scale).round() as u32;
+                    let h=(template.height as f32*scale).round() as u32;
+                    if w==0 || h==0 { continue; }
+                    if let Some(image)=image::RgbaImage::from_raw(template.width,template.height,template.bgra.clone()) {
+                        let pixels=image::imageops::resize(&image,w,h,image::imageops::FilterType::Nearest).into_raw();
+                        let mut scaled=ButtonTemplate::new(template.id,format!("{} ×{scale:.2}",template.name),w,h,pixels,template.threshold);
+                        scaled.hue_invariant=template.hue_invariant;
+                        scaled.click_button=template.click_button;
+                        scaled.click_type=template.click_type;
+                        scaled.hold_ms=template.hold_ms;
+                        scaled.enabled=template.enabled;
+                        next.templates.push(scaled);
+                    }
+                }
+                fast_configs.push(next);
+            }
+        }
         Self { config, detector: PopupDetector::new(), pending: None,
-            next_input_at: Duration::ZERO, geometry: None }
+            next_input_at: Duration::ZERO, geometry: None, fast_configs, scale_cursor:0 }
     }
 
     pub fn observe(&mut self, frame: &HunterFrame, now: Duration,
@@ -48,7 +75,13 @@ impl HunterSession {
             self.detector = PopupDetector::new();
             self.geometry = Some(geometry);
         }
-        let target = find_cancellable(frame, &self.config, &mut self.detector, running);
+        let search_config=if self.fast_configs.is_empty() { &self.config }
+            else { let i=self.scale_cursor; self.scale_cursor=(i+1)%self.fast_configs.len(); &self.fast_configs[i] };
+        let target = find_cancellable(frame, search_config, &mut self.detector, running);
+        // Once a size works, keep it hot while that target remains visible.
+        if target.is_some() && !self.fast_configs.is_empty() {
+            self.scale_cursor=(self.scale_cursor+self.fast_configs.len()-1)%self.fast_configs.len();
+        }
         let start_input = target.is_some() && self.pending.is_none() && now >= self.next_input_at
             && !running.is_some_and(|r| !r.load(std::sync::atomic::Ordering::Relaxed));
         if start_input {
@@ -189,7 +222,7 @@ pub fn find_cancellable(
     if config.mode != VisionMode::AutoPopup {
         for template in config.templates.iter().filter(|t| t.enabled) {
             let scales: &[f32] = if config.multiscale {
-                &[1.0, 0.75, 1.25, 0.5, 1.5, 2.0]
+                &[1.0, 0.9, 1.1, 0.8, 1.2, 0.75, 1.25, 0.6, 1.4, 0.5, 1.5, 1.75, 2.0]
             } else {
                 &[1.0]
             };
@@ -244,6 +277,10 @@ pub fn find_cancellable(
                             scale
                         ),
                     }); }
+                }
+                if selected.is_some() && !config.only_new_targets {
+                    detector.template_appearances.finish_frame(&frame.image);
+                    return selected;
                 }
             }
         }
@@ -306,6 +343,100 @@ pub fn preview(frame: &HunterFrame, target: Option<&HunterTarget>) -> (Vec<u8>, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn moving_picture_uses_fresh_coordinates_and_keeps_the_working_scale() {
+        let template=ButtonTemplate::from_file(1,"moving".into(),
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures/rainbow-circle-sample.png"),0.90).unwrap();
+        let mut config=VisionConfig::default();
+        config.mode=VisionMode::TemplateMatch;
+        config.only_new_targets=false;
+        config.cooldown_ms=50.0;
+        config.templates=vec![template.clone()];
+        let mut session=HunterSession::new(config);
+        assert_eq!(session.fast_configs.len(),12);
+        assert!(session.fast_configs.iter().all(|c|!c.multiscale && c.templates.len()==2));
+        let source=image::RgbaImage::from_raw(template.width,template.height,template.bgra.clone()).unwrap();
+        let side=(template.width as f32*1.1).round() as u32;
+        let picture=image::imageops::resize(&source,side,side,image::imageops::FilterType::Triangle);
+        for tick in 0..10 {
+            let (x,y)=(61+tick*22,73+tick*3);
+            let mut frame=HunterFrame {hwnd:1,origin:(-100,40),image:ScreenCapture {
+                width:640,height:360,buffer:[25,140,30,255].repeat(640*360),
+            }};
+            for (dx,dy,p) in picture.enumerate_pixels() { if p[3]>=128 {
+                let i=(((y+dy)*640+x+dx)*4) as usize;
+                frame.image.buffer[i..i+4].copy_from_slice(&p.0);
+            }}
+            let now=Duration::from_millis(tick as u64*80);
+            let observed=session.observe(&frame,now,None);
+            // The first alternate size is .9; the next frame checks 1.1 and keeps it hot.
+            if tick>0 {
+                let target=observed.target.expect("moving circle must remain detectable");
+                assert!((target.x-(x as i32+side as i32/2-100)).abs()<=5);
+                assert!((target.y-(y as i32+side as i32/2+40)).abs()<=5);
+                assert!(observed.start_input,"moving target must not require focus toggling");
+            }
+            if observed.start_input { session.complete_input(true,now); }
+        }
+    }
+    #[test]
+    fn rainbow_sample_matches_changed_scenery_and_size_without_background_clicks() {
+        let sample = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../tests/fixtures/rainbow-circle-sample.png");
+        let template = ButtonTemplate::from_file(1, "rainbow".into(), &sample, 0.90).unwrap();
+        assert!((template.width as i32-template.height as i32).abs()<12, "circle must be isolated from text/scenery");
+        assert!(template.width < 165);
+        assert!(template.bgra.chunks_exact(4).any(|p| p[3] == 0));
+        let no_popup = image::load_from_memory(include_bytes!("../../tests/fixtures/roblox-hud-no-popup.png")).unwrap().to_rgba8();
+        let mut no_popup_config = VisionConfig::default();
+        no_popup_config.mode = VisionMode::TemplateMatch;
+        no_popup_config.only_new_targets = false;
+        no_popup_config.templates = vec![template.clone()];
+        let no_popup_frame = HunterFrame { hwnd: 0, origin: (0,0), image: ScreenCapture {
+            width: no_popup.width() as i32, height: no_popup.height() as i32,
+            buffer: no_popup.pixels().flat_map(|p| [p[2],p[1],p[0],p[3]]).collect(),
+        }};
+        let full_started=std::time::Instant::now();
+        assert!(find(&no_popup_frame,&no_popup_config,&mut PopupDetector::new()).is_none(), "HUD must not match the rainbow sample");
+        let full_ms=full_started.elapsed().as_secs_f64()*1000.0;
+        let mut fast=HunterSession::new(no_popup_config.clone());
+        let fast_started=std::time::Instant::now();
+        assert!(fast.observe(&no_popup_frame,Duration::ZERO,None).target.is_none());
+        eprintln!("1920x1080 no-popup scan: exhaustive={full_ms:.1}ms, realtime={:.1}ms",fast_started.elapsed().as_secs_f64()*1000.0);
+        assert!(template.hue_invariant, "rainbow sample must tolerate animated hues");
+        for (scale,cycle_hue) in [(1.0,false),(1.1,false),(0.9,false),(1.0,true)] {
+            let mut config = VisionConfig::default();
+            config.mode = VisionMode::TemplateMatch;
+            config.only_new_targets = false;
+            config.templates = vec![template.clone()];
+            let mut frame = HunterFrame { image: ScreenCapture {
+                width: 400, height: 320, buffer: [30,160,25,255].repeat(400*320),
+            }, origin: (0,0), hwnd: 0 };
+            let mut detector = PopupDetector::new();
+            assert!(find(&frame, &config, &mut detector).is_none(), "plain green background must not match");
+            let mut image = image::open(&sample).unwrap().to_rgba8();
+            // Independent outline measured in the original fixture, not the generated mask.
+            for (x,y,p) in image.enumerate_pixels_mut() {
+                if (x as i32-72).pow(2)+(y as i32-90).pow(2)>76*76 { *p=image::Rgba([25,160,30,255]); }
+                if cycle_hue && p.0[..3].iter().max().unwrap()-p.0[..3].iter().min().unwrap()>60 {
+                    p.0[..3].rotate_left(1);
+                }
+                p.0.swap(0,2);
+            }
+            let scaled = image::imageops::resize(&image,
+                (image.width() as f32*scale).round() as u32,
+                (image.height() as f32*scale).round() as u32,image::imageops::FilterType::Triangle);
+            for (x,y,p) in scaled.enumerate_pixels() {
+                if p[3]>=128 {
+                    let i=(((y+83)*400+x+101)*4) as usize;
+                    frame.image.buffer[i..i+4].copy_from_slice(&p.0);
+                }
+            }
+            let target = find(&frame,&config,&mut detector).expect("circle on different scenery must match");
+            assert!((target.x-(101+(72.0*scale) as i32)).abs()<=8, "click must stay in circle");
+            assert!((target.y-(83+(90.0*scale) as i32)).abs()<=8);
+        }
+    }
     #[test]
     fn roi_intersection_handles_negative_monitor_coordinates() {
         assert_eq!(

@@ -13,6 +13,10 @@ build/
 dist/
 *.spec
 ClickerPro_Python.exe
+ClickerPro_Rust.exe
+log_run.txt
+python_clicker.py
+*Python*.bat
 # Test images and scratch
 *.png
 ClickerPro_AutoHunter.exe
